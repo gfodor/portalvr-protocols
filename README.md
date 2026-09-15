@@ -14,4 +14,4 @@ The controller apps share a common packet prefix but currently emit different ve
 
 This repository covers phone mode and the camera tracker. Headset mode and its transport are outside scope. It contains documentation and embedded receiver examples, not a desktop VR driver.
 
-The reference was checked against the app source on September 15, 2026. [Source revisions and implementation links](PROTOCOLS.md#source-evidence-and-compatibility) are recorded in the document. Receiver examples were checked with synthetic packets and fragmented streams; physical-device interoperability has not been tested here.
+The reference was checked against the app implementations on September 15, 2026. Receiver examples were checked with synthetic packets and fragmented streams; physical-device interoperability has not been tested here. See the [compatibility notes](PROTOCOLS.md#compatibility-notes) for differences from older protocol descriptions.

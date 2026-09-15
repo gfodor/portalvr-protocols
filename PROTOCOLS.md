@@ -15,7 +15,7 @@ All offsets below are in bytes, starting at zero. All multibyte payload fields a
 - [Tracker clock synchronization and calibration](#tracker-clock-synchronization-and-calibration)
 - [Reference receiver code](#reference-receiver-code)
 - [Integration checklist and troubleshooting](#integration-checklist-and-troubleshooting)
-- [Source evidence and compatibility](#source-evidence-and-compatibility)
+- [Compatibility notes](#compatibility-notes)
 
 ## Choose an app and connection
 
@@ -675,30 +675,8 @@ For a zeroed controller sample, set quaternion W at offset 26 to float `1.0` (`0
 
 The reference code validates current layouts, not all historical firmware. For production, reject nonfinite measurement values before using them, bound buffers, preserve frame boundaries, tolerate unknown flag bits, and keep a single parser state per connection. Release inputs on errors and discard partial parser buffers before reconnecting.
 
-## Source evidence and compatibility
+## Compatibility notes
 
-Documented from the local source trees on **2026-09-15**:
+The current layouts above were checked against the app implementations on **2026-09-15**. This document does not claim physical-device interoperability testing.
 
-| Repository | Inspected HEAD |
-| --- | --- |
-| `ios-controller-tracking` | `023699889572238ef20224de371ea93e84552aa5` |
-| `portal-controller-ios` | `855c30190057b1dfdc7da485f262b1d64d2fd402` |
-| `portal-controller-android` | `a4469a221bd23c1e293991ddef3f9cd333dcd884` |
-
-The following links are relative to sibling source checkouts; the wire descriptions and reference code above do not require those checkouts to use.
-
-| Contract | Primary implementation |
-| --- | --- |
-| Tracker byte encoder | [PosePacket.swift](../ios-controller-tracking/PortalVRTracker/PosePacket.swift) |
-| Tracker versions, joint selection, sequence, status | [PosePacketBuilder.swift](../ios-controller-tracking/PortalVRTracker/PosePacketBuilder.swift), [PosePacketFlags.swift](../ios-controller-tracking/PortalVRTracker/PosePacketFlags.swift), [PosePipeline.swift](../ios-controller-tracking/PortalVRTracker/PosePipeline.swift) |
-| Tracker connection, sync, overwrite policy | [PoseTransmitter.swift](../ios-controller-tracking/PortalVRTracker/PoseTransmitter.swift), [PoseTransportHelpers.swift](../ios-controller-tracking/PortalVRTracker/PoseTransportHelpers.swift) |
-| Tracker coordinates and calibration | [PoseCoordinateMapper.swift](../ios-controller-tracking/PortalVRTracker/PoseCoordinateMapper.swift), [HandTrackingGeometry.swift](../ios-controller-tracking/PortalVRTracker/HandTrackingGeometry.swift), [PhonePitchMonitor.swift](../ios-controller-tracking/PortalVRTracker/PhonePitchMonitor.swift), [HandTrackingTuning.swift](../ios-controller-tracking/PortalVRTracker/HandTrackingTuning.swift) |
-| Tracker launch links | [TrackerDeepLink.swift](../ios-controller-tracking/PortalVRTracker/TrackerDeepLink.swift) |
-| Host USBMux setup | [usbmux.py](../ios-controller-tracking/python-client/src/poseviewer_runtime/transport/usbmux.py) |
-| iOS controller layout and commands | [StatePacket.swift](../portal-controller-ios/PortalController/PortalControllerPackage/Sources/PortalControllerFeature/Core/Controller/StatePacket.swift), [ControllerClient.swift](../portal-controller-ios/PortalController/PortalControllerPackage/Sources/PortalControllerFeature/Core/Controller/ControllerClient.swift) |
-| iOS controller transport | [UsbMuxTransportAdapter.swift](../portal-controller-ios/PortalController/PortalControllerPackage/Sources/PortalControllerFeature/Core/Transport/USB/UsbMuxTransportAdapter.swift) |
-| iOS phone pose construction | [ARSessionManager.swift](../portal-controller-ios/PortalController/PortalControllerPackage/Sources/PortalControllerFeature/Core/AR/ARSessionManager.swift) |
-| Android phone encoder and controls | [BleClient.java](../portal-controller-android/app/src/main/java/io/portalvr/controller/BleClient.java), [MainActivity.java](../portal-controller-android/app/src/main/java/io/portalvr/controller/MainActivity.java) |
-| Android phone transport | [ControllerTransportManager.java](../portal-controller-android/app/src/main/java/io/portalvr/controller/transport/ControllerTransportManager.java), [UsbAccessoryManager.java](../portal-controller-android/app/src/main/java/io/portalvr/controller/usb/UsbAccessoryManager.java), [UsbAccessorySession.java](../portal-controller-android/app/src/main/java/io/portalvr/controller/usb/UsbAccessorySession.java), [accessory_filter.xml](../portal-controller-android/app/src/main/res/xml/accessory_filter.xml) |
-
-Source encoders take precedence over older project plans and README prose. In particular, the old 54-byte/4 ms/BLE controller description does not describe the current apps; the Android phone's current 171-byte size is not optional. The tracker's bundled Python `pose_packets.py` currently accepts only versions `01..0d`, so it must not be used unchanged to decode this tracker build. The current layouts above were checked against the producing code; this document does not claim physical-device interoperability testing.
+The old 54-byte/4 ms/BLE controller description does not describe the current apps; the Android phone's current 171-byte size is not optional. Older tracker decoders accepting only versions `01..0d` must be updated before decoding this tracker build. Use the packet versions and layouts documented here rather than assuming compatibility with older protocol descriptions.
