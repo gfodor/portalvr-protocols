@@ -54,11 +54,13 @@ and copies the whole image unchanged; it provides no optical correction.
    equivalent group first. V1 supports one desktop display target and GPU.
 6. Restart SteamVR and the application to adopt the plugin's image/view geometry.
 
-The unwarped **PortalVR output controls** window provides status and recovery
-actions. It opens on another monitor when available. On a single-desktop setup
-it is a separate window on that desktop; close/hide it for unobstructed output.
-Escape reopens the controls. **PortalVR settings** opens the existing settings
-there rather than drawing controls directly onto the corrected projector image.
+For plugins with inverse pointer mapping, the usual input setup, onboarding and
+Escape settings appear as an ImGui overlay on the main view. PortalVR composites
+that UI into the logical canvas before the plugin corrects the image.
+**Display > Output plugins...** explicitly opens the separate plugin-controls
+window; **PortalVR settings** returns to the main-view settings. Plugins without
+inverse mapping retain an unwarped interactive fallback. Plugin startup/render
+errors expose host-owned recovery controls.
 
 ## Calibration changes
 
@@ -143,7 +145,7 @@ not a license check; the plugin reports SDK/license availability explicitly.
 ```mermaid
 flowchart LR
     A[SteamVR shared image] --> B[Host local logical canvas]
-    B --> C[Content crop and optional scene HUD]
+    B --> C[Content crop and main-view PortalVR UI]
     C --> D[Plugin warp and blend channels]
     D --> E[Complete corrected output atlas]
     E --> F[Host copy to backbuffer]
@@ -344,15 +346,34 @@ would need another transport/resource-sharing design.
 
 ## Operator experience and failures
 
-The default operator settings UI lives on an unwarped control window. Scene HUDs
-that must appear on the screen are composited into the logical canvas before
-correction. No projector UI is drawn directly onto the warped backbuffer.
+When a plugin advertises inverse pointer mapping, normal PortalVR onboarding
+and Escape settings appear on the main view. The host renders the UI into a
+transparent intermediate, handles premultiplied-alpha blending and conversion
+to the plan's declared transfer, and composites it into the logical canvas
+before calling the plugin. The plugin receives the same opaque image contract,
+now including the UI; there is no additional UI resource or ABI entry point.
+No projector UI is drawn directly onto the corrected backbuffer.
 
-If projected settings are enabled, the optional inverse mapping converts mouse
-positions from physical output pixels to canvas pixels. An invalid inverse
-suppresses that pointer event. Without a supported inverse, interactive settings
-remain in the operator window; the host never sends physical coordinates into
-a warped UI as though they were logical coordinates.
+The separate operator window is for explicitly opened output-plugin controls,
+failure recovery, and the interactive fallback when inverse mapping is absent.
+For a plugin with mapping, Escape and the **PortalVR settings** action return
+from plugin controls to ordinary settings on the main view.
+
+### Pointer mapping for main-view interaction
+
+`map_pointer` remains optional in ABI 1.0. To retain the main-view mouse UI, set
+`PVR_OUTPUT_CAP_POINTER_MAPPING` and provide a working callback. It converts
+physical output pixels with a top-left origin into logical input-canvas pixels
+using the active plan's calibration snapshot. Returned valid positions must be
+finite and inside the input canvas. If a location has no unambiguous inverse,
+return `valid = 0`; the host suppresses interaction there and can still clear
+held buttons. Identity mapping is appropriate only for unchanged geometry with
+matching input/output pixel coordinates.
+
+Without the capability/callback, PortalVR keeps interactive onboarding and
+settings in an unwarped window. The host never treats raw physical coordinates
+as logical coordinates for a warped image. Test the inverse alongside the mesh
+and update both together during calibration reload.
 
 Selected-plugin startup/render failure produces black projector output and a
 host-owned operator status with a disable/reload/restart action. It never
@@ -436,7 +457,7 @@ Replace these sample operations:
 | `render` | Validate the generation. For each channel, warp/blend the entire input into a channel texture, then copy it to its declared atlas rectangle. Return OK only when every channel succeeded. |
 | `detach` | Release all SDK GPU bindings, backbuffer references and plugin-created GPU resources. Be safe after partial attach failure and repeated calls. |
 | `destroy` | Join workers, free CPU calibration/SDK handles and release runtime DLL references. |
-| `map_pointer` | If supported, invert calibrated physical-output positions to logical canvas positions. Otherwise clear its capability and return a null callback. |
+| `map_pointer` | Invert calibrated physical-output positions to logical canvas positions for main-view mouse interaction. Set the matching capability only with a working inverse; otherwise use a null callback and the host's unwarped UI fallback. |
 
 An abstract frame loop is:
 
@@ -509,6 +530,11 @@ addition to the SDK-free smoke test. Automated coverage alone is insufficient:
   SteamVR/application restart, including applications caching their projection.
 - Unicode paths, side-by-side plugin versions, absent optional pointer mapping,
   worker shutdown and plugin dependency lookup follow the documented contracts.
+- With mapping, normal onboarding and Escape settings remain on the main view.
+  Check click/scroll alignment, finite in-bounds inverse coordinates, invalid
+  locations, and mapping consistency after reload. Without mapping, verify the
+  unwarped interactive fallback. Explicit plugin controls and error recovery
+  must remain accessible.
 - A licensed integrator validates the supported SDK on its physical calibrated
   projector installation. A pass-through/WARP test cannot establish optical alignment.
 - Benchmark CPU/GPU frame time, missed vblanks and memory at full two/three-output
@@ -525,6 +551,13 @@ transfer, state isolation, partial-output rejection, transactional reload,
 worker shutdown, cached backbuffer release, generations and fresh-device
 attachment. Full-resolution WARP checks cover two and three channels at
 7680 by 1600. The packaged example also builds independently using public files.
+
+The main-view UI behavior above uses the existing ABI 1.0 pointer-mapping
+capability. Its exported table, structures and header are unchanged. Host UI
+routing and transparent overlay blending have regression coverage, including
+linear and sRGB transfer. A local SDK-free test plugin also displayed normal
+onboarding over the main image at 3840 by 2160; this does not validate another
+plugin's inverse mapping, optical calibration or hardware timing.
 
 These checks do not establish live application geometry, optical alignment,
 physical vblank pacing, vendor licensing behavior or projector recovery.
