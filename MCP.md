@@ -338,136 +338,436 @@ Error messages never include file paths, pipe names, secrets, or stack traces.
 
 ## Built-in tools
 
-`tools/list` returns the built-in tools in the order below, followed by any [application custom tools](#application-custom-tools). Each tool's `inputSchema` is self-contained JSON Schema with `additionalProperties: false`, and its `annotations` give `readOnlyHint`, `destructiveHint`, `idempotentHint`, and `openWorldHint`.
+This section is the reference for all 25 built-in tools. `tools/list` returns them in the order of the [index](#tool-index), followed by any [application custom tools](#application-custom-tools). Each tool's advertised `inputSchema` is self-contained JSON Schema with `additionalProperties: false`, so an unknown argument is an `INVALID_ARGUMENT` error.
 
 ### Conventions
 
-- **Vectors and quaternions** are JSON arrays: positions `[x, y, z]` in metres, quaternions `[x, y, z, w]`.
+- **Vectors and quaternions** are JSON arrays: positions `[x, y, z]` in metres, quaternions `[x, y, z, w]`. Quaternion arguments are normalized before use; a zero or non-finite quaternion is rejected.
 - **Coordinates** follow OpenXR: right-handed, +X right, +Y up, −Z forward.
 - **`base_space`** is `local`, `stage`, `local_floor`, or `view`, default `local_floor`. The conversion tool's `source_space` and `target_space` take the same values.
 - **`hand`** is `left` or `right`. **`pose_type`** is `grip` (default) or `aim`.
-- **`session_handle`** is an optional positive integer returned by session tools. When omitted, the server picks the active session, or fails with `AMBIGUOUS_SESSION` or `NO_ACTIVE_SESSION`.
-- **SteamVR limits:** head and grip poses, pose overrides, and every call for an OpenVR application go through SteamVR, which supports only `view`, `stage`, and `local_floor`; `local` returns `SPACE_UNSUPPORTED`. SteamVR treats `stage` and `local_floor` as the same space. `aim` poses can be read only from a focused OpenXR application; otherwise `aim` reads and overrides return `CAPABILITY_UNAVAILABLE`, and retrying will not help. `openxr_convert_pose_between_spaces` uses the application's own OpenXR spaces when it is a focused OpenXR application.
+- **`session_handle`** is an optional positive integer; read it from [`openxr_get_session_info`](#openxr_get_session_info). When omitted, the server picks the active session. Handles change, so prefer omitting it; see [scope and compatibility](#scope-and-compatibility).
+- **SteamVR limits:** head and grip poses, pose overrides, and every call for an OpenVR application go through SteamVR, which supports only `view`, `stage`, and `local_floor`; `local` returns `SPACE_UNSUPPORTED`. SteamVR treats `stage` and `local_floor` as the same space. `aim` poses can be read only from a focused OpenXR application; otherwise `aim` reads and overrides return `CAPABILITY_UNAVAILABLE`, and retrying will not help.
 - **Timestamps:** names ending `_ns` are runtime monotonic nanoseconds; names ending `_utc` are `YYYY-MM-DDTHH:mm:ss.sssZ`.
-- Numbers use the shortest round-trip decimal form, and object keys appear in a fixed order.
+- **Encoding:** numbers use the shortest round-trip decimal form, and object keys appear in the order shown.
+- **Validation first:** arguments are checked against the schema and the rules below before a session is selected, so a malformed call returns `INVALID_ARGUMENT` even when no XR application is running.
 
-Observation results (the `openxr_get_*` tools and `openxr_convert_pose_between_spaces`) include a `_portalvr` object with `schema_version`, `backend` (`steamvr` for both OpenVR and OpenXR applications on SteamVR), `session_generation`, `state_sequence`, `sample_monotonic_ns`, `age_ms` (how old the observation is), and `synthetic`. `synthetic` is always true for instance, system, session, frame, and profile results from SteamVR, and true for a pose while an MCP override supplies it. The examples below omit `_portalvr`. The input and capture tools return their own `_portalvr` fields, shown below; the pose setters and `openxr_exit_session` return none.
+**`_portalvr` metadata.** Results of the observation tools (the `openxr_get_*` tools and `openxr_convert_pose_between_spaces`) end with a `_portalvr` object:
 
-### Summary
+| Field | Meaning |
+| --- | --- |
+| `schema_version` | `1` |
+| `backend` | `steamvr` for both OpenVR and OpenXR applications on SteamVR |
+| `session_generation` | Changes when the session's adapter restarts |
+| `state_sequence` | Increases with each observed state change |
+| `sample_monotonic_ns` | When the reported value was sampled |
+| `age_ms` | How old the observation was when the result was built |
+| `synthetic` | Always `true` for instance, system, session, frame, and profile results from SteamVR; for a pose, `true` while an MCP override supplies it |
 
-| Tool | Arguments | Effect |
-| --- | --- | --- |
-| `openxr_get_instance_info` | `include_api_layers`, `include_enabled_extensions`, `include_available_extensions` (booleans, default false) | Reads |
-| `openxr_get_session_info` | `include_history` (default false) | Reads |
-| `openxr_exit_session` | `session_handle` | Asks an OpenXR application to exit |
-| `openxr_get_frame_info` | `include_history` (default false) | Reads |
-| `openxr_get_system_info` | none | Reads |
-| `openxr_get_head_pose` | `session_handle`, `base_space` | Reads |
-| `openxr_get_controller_pose` | **`hand`**, `pose_type`, `base_space`, `session_handle` | Reads |
-| `openxr_get_active_interaction_profile` | `hand` (`left`, `right`, or `both`; default `both`), `session_handle` | Reads |
-| `openxr_list_spatial_entities` | `base_space`, `session_handle` | Not yet available |
-| `openxr_capture_composited_image` | `eye` (`left` or `right`; default `left`), `session_handle` | Reads pixels |
-| `math_calc` | **`expression`** | Pure |
-| `math_dot`, `math_cross` | **`vector_a`**, **`vector_b`** | Pure |
-| `math_add`, `math_sub`, `math_mul`, `math_div` | **`a`**, **`b`** | Pure |
-| `math_build_quat` | **`front_direction`**, `up_direction` (default `[0,1,0]`), `return_basis_vectors` (default false) | Pure |
-| `math_decompose_quat` | **`quaternion`** | Pure |
-| `openxr_set_controller_input` | **`hand`**, **`component`**, **`value`**, `sub_component`, `auto_release`, `hold_duration`, `session_handle` | Injects input |
-| `openxr_set_head_pose` | `position`, `orientation`, `base_space`, `duration_seconds`, `session_handle` | Overrides the head pose |
-| `openxr_set_controller_pose` | **`hand`**, `pose_type`, `position`, `orientation`, `base_space`, `duration_seconds`, `session_handle` | Overrides a controller pose |
-| `convert_unity_pose_to_openxr` | `position`, `orientation` | Pure |
-| `convert_openxr_pose_to_unity` | `position`, `orientation` | Pure |
-| `openxr_convert_pose_between_spaces` | `source_space` (default `local_floor`), `target_space` (default `stage`), `position` (default origin), `orientation` (default identity), `session_handle` | Reads the space relation |
+The examples below omit `_portalvr` unless a tool returns different fields. The input and capture tools return their own `_portalvr` fields; the pose setters, `openxr_exit_session`, and the math and Unity conversion tools return none.
 
-Bold arguments are required.
+**Errors every XR tool can return.** Besides the errors listed per tool, any tool that reads or drives an XR application can return `NO_ACTIVE_RUNTIME`, `NO_ACTIVE_SESSION`, `AMBIGUOUS_SESSION`, `STALE_SESSION`, `BACKEND_OFFLINE`, `BUSY`, `TIMEOUT`, `CANCELLED`, and `INTERNAL_ERROR`. See [tool results and errors](#tool-results-and-errors).
 
-### Application and session
+### Tool index
 
-`openxr_get_instance_info` returns the application, the reporting component as `engine` (`PortalVR SteamVR OpenXR API layer` for OpenXR applications, `PortalVR SteamVR server driver` for OpenVR applications), the API version, and optionally the requested name lists:
+Annotations: **R** read-only, **D** destructive, **I** idempotent, **W** open-world (depends on or affects the live XR application). Bold arguments are required.
+
+| Tool | Arguments | Annotations | Needs |
+| --- | --- | --- | --- |
+| [`openxr_get_instance_info`](#openxr_get_instance_info) | `include_api_layers`, `include_enabled_extensions`, `include_available_extensions` | R I | Runtime |
+| [`openxr_get_session_info`](#openxr_get_session_info) | `include_history` | R | Session |
+| [`openxr_exit_session`](#openxr_exit_session) | `session_handle` | D I W | Focused OpenXR application |
+| [`openxr_get_frame_info`](#openxr_get_frame_info) | `include_history` | R | Session with frames |
+| [`openxr_get_system_info`](#openxr_get_system_info) | none | R I | Runtime |
+| [`openxr_get_head_pose`](#openxr_get_head_pose) | `base_space`, `session_handle` | R W | Active headset |
+| [`openxr_get_controller_pose`](#openxr_get_controller_pose) | **`hand`**, `pose_type`, `base_space`, `session_handle` | R W | Known controller |
+| [`openxr_get_active_interaction_profile`](#openxr_get_active_interaction_profile) | `hand`, `session_handle` | R W | Known controller |
+| [`openxr_list_spatial_entities`](#openxr_list_spatial_entities) | `base_space`, `session_handle` | R W | Not available |
+| [`openxr_capture_composited_image`](#openxr_capture_composited_image) | `eye`, `session_handle` | R W | Session with frames |
+| [`math_calc`](#math_calc) | **`expression`** | R I | Nothing |
+| [`math_dot`](#math_dot) | **`vector_a`**, **`vector_b`** | R I | Nothing |
+| [`math_cross`](#math_cross) | **`vector_a`**, **`vector_b`** | R I | Nothing |
+| [`math_add`](#math_add-math_sub-math_mul-math_div) | **`a`**, **`b`** | R I | Nothing |
+| [`math_sub`](#math_add-math_sub-math_mul-math_div) | **`a`**, **`b`** | R I | Nothing |
+| [`math_mul`](#math_add-math_sub-math_mul-math_div) | **`a`**, **`b`** | R I | Nothing |
+| [`math_div`](#math_add-math_sub-math_mul-math_div) | **`a`**, **`b`** | R I | Nothing |
+| [`math_build_quat`](#math_build_quat) | **`front_direction`**, `up_direction`, `return_basis_vectors` | R I | Nothing |
+| [`math_decompose_quat`](#math_decompose_quat) | **`quaternion`** | R I | Nothing |
+| [`openxr_set_controller_input`](#openxr_set_controller_input) | **`hand`**, **`component`**, **`value`**, `sub_component`, `auto_release`, `hold_duration`, `session_handle` | W | Active controller |
+| [`openxr_set_head_pose`](#openxr_set_head_pose) | `position`, `orientation`, `base_space`, `duration_seconds`, `session_handle` | I W | Active headset |
+| [`openxr_set_controller_pose`](#openxr_set_controller_pose) | **`hand`**, `pose_type`, `position`, `orientation`, `base_space`, `duration_seconds`, `session_handle` | I W | Active controller |
+| [`convert_unity_pose_to_openxr`](#convert_unity_pose_to_openxr-convert_openxr_pose_to_unity) | `position`, `orientation` | R I | Nothing |
+| [`convert_openxr_pose_to_unity`](#convert_unity_pose_to_openxr-convert_openxr_pose_to_unity) | `position`, `orientation` | R I | Nothing |
+| [`openxr_convert_pose_between_spaces`](#openxr_convert_pose_between_spaces) | `source_space`, `target_space`, `position`, `orientation`, `session_handle` | R W | Session with a head pose |
+
+"Runtime" means a connected SteamVR runtime, with or without a running application. "Known controller" means PortalVR reports a controller profile for that hand; "active controller" means that controller is currently connected. See [controllers for input and pose control](#controllers-for-input-and-pose-control).
+
+### `openxr_get_instance_info`
+
+Gets the current XR application's name, the reporting component, the API version, and optionally its API layers and extensions.
+
+| Argument | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `include_api_layers` | boolean | `false` | Include enabled API layer names |
+| `include_enabled_extensions` | boolean | `false` | Include enabled extension names |
+| `include_available_extensions` | boolean | `false` | Include extensions available to the instance |
+
+This tool selects a runtime rather than a session and takes no `session_handle`.
 
 ```json
 {"application":{"name":"Sample","version":1},"engine":{"name":"PortalVR SteamVR OpenXR API layer","version":1},"api_version":{"major":1,"minor":1,"patch":0},"timestamp_utc":"2026-08-22T18:00:00.000Z","enabled_extensions":["XR_EXT_local_floor"]}
 ```
 
-`openxr_get_system_info` returns `system_id`, `vendor_id`, `system_name`, `graphics_properties` (`max_swapchain_image_width`, `max_swapchain_image_height`, `max_layer_count`), and `tracking_properties` (`orientation_tracking`, `position_tracking`).
+- `application` is the OpenXR application name and version. For an OpenVR application it is the SteamVR application name, or `SteamVR` when none is known.
+- `engine` names the PortalVR component reporting the data: `PortalVR SteamVR OpenXR API layer` for a focused OpenXR application, `PortalVR SteamVR server driver` otherwise. It does not identify the application's game engine.
+- `api_layers`, `enabled_extensions`, and `available_extensions` appear only when requested, as arrays (possibly empty). Enabled names keep instance-creation order; available names are sorted. OpenVR applications report empty lists.
 
-`openxr_get_session_info` returns `session_handle`, `state` (an uppercase OpenXR session state such as `FOCUSED`), and the booleans `focused`, `visible`, and `running`. With `include_history`, `history` lists retained transitions as `{"from","to","time_utc","reason"}`.
+**Errors:** `NO_ACTIVE_RUNTIME`; `AMBIGUOUS_RUNTIME` when several runtimes are connected and none has an active session; `CAPABILITY_UNAVAILABLE`.
 
-`openxr_get_frame_info` returns `frame_id`, `predicted_display_time_ns`, `predicted_display_period_ns`, `should_render`, `display_time_ns`, `environment_blend_mode` (`OPAQUE`, `ADDITIVE`, or `ALPHA_BLEND`), `layer_count`, `layers` (`index`, `type`, `flags`, `view_count`), and `submission_complete`. With `include_history`, `history` lists earlier frames in the same shape.
+### `openxr_get_session_info`
 
-`openxr_exit_session` asks a focused OpenXR application to end its session through `xrRequestExitSession`. It does not promise that the process terminates. It returns `{"session_handle":42,"exit_requested":true,"observable_state_sequence":4824}`. SteamVR offers drivers no safe way to close an OpenVR application, so for OpenVR applications the tool returns `CAPABILITY_UNAVAILABLE`.
+Gets the selected session's handle and lifecycle state, optionally with its transition history. Use it to discover the current `session_handle`.
 
-### Poses and profiles
+| Argument | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `include_history` | boolean | `false` | Include the retained lifecycle transitions |
 
-`openxr_get_head_pose` takes a fresh sample:
+```json
+{"session_handle":42,"state":"FOCUSED","focused":true,"visible":true,"running":true,"history":[{"from":"VISIBLE","to":"FOCUSED","time_utc":"2026-08-22T18:00:00.000Z","reason":"runtime"}]}
+```
+
+- `state` is one of `IDLE`, `READY`, `SYNCHRONIZED`, `VISIBLE`, `FOCUSED`, `STOPPING`, `EXITING`, `LOSS_PENDING`, or `UNKNOWN`.
+- `focused` is true only in `FOCUSED`; `visible` is true in `VISIBLE` or `FOCUSED`; `running` is true while the session runs.
+- `history`, present only when requested, lists up to the last 64 transitions, oldest first. `reason` is always `runtime`.
+
+**Errors:** only the common XR errors.
+
+### `openxr_exit_session`
+
+Asks the selected application to end its XR session. This may cause the application to exit.
+
+| Argument | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `session_handle` | number | active session | Session to end |
+
+It works only for a focused OpenXR application, through `xrRequestExitSession`, and does not promise that the process terminates.
+
+```json
+{"session_handle":42,"exit_requested":true,"observable_state_sequence":4824}
+```
+
+**Errors:** `CAPABILITY_UNAVAILABLE` for OpenVR applications and for OpenXR applications that are not focused, because SteamVR gives drivers no safe way to close an application; `INTERNAL_ERROR` if the application's runtime rejects the request.
+
+### `openxr_get_frame_info`
+
+Gets the latest frame's predicted display timing, render flag, submitted display time, blend mode, and composition layers, optionally with recent frames.
+
+| Argument | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `include_history` | boolean | `false` | Include retained frames |
+
+```json
+{"frame_id":1234,"predicted_display_time_ns":9876543210,"predicted_display_period_ns":11111111,"should_render":true,"display_time_ns":9876543210,"environment_blend_mode":"OPAQUE","layer_count":1,"layers":[{"index":0,"type":"projection","flags":0,"view_count":2}],"submission_complete":true}
+```
+
+- `environment_blend_mode` is `OPAQUE`, `ADDITIVE`, `ALPHA_BLEND`, or `UNKNOWN`.
+- Each layer's `type` is `projection`, `projection_depth`, `quad`, `cube`, `cylinder`, `equirect`, `passthrough`, or `unknown`.
+- `history`, present only when requested, lists up to the last 120 frames in the same shape, oldest first.
+
+**Errors:** `CAPABILITY_UNAVAILABLE` until the session has submitted a frame; `BACKEND_OFFLINE` when the latest frame is older than two display periods plus 50 ms, for example while the application is paused.
+
+### `openxr_get_system_info`
+
+Gets the XR system's identity, graphics limits, and tracking capabilities. Takes no arguments.
+
+```json
+{"system_id":1,"vendor_id":0,"system_name":"PortalVR","graphics_properties":{"max_swapchain_image_width":2016,"max_swapchain_image_height":2240,"max_layer_count":1},"tracking_properties":{"orientation_tracking":true,"position_tracking":true}}
+```
+
+For an OpenVR application, the SteamVR driver reports an opaque per-session `system_id`, the headset's recommended render size as the maximum swapchain size, and a `max_layer_count` of `1`. A focused OpenXR application reports the values its runtime returned. Like instance information, this tool selects a runtime and takes no `session_handle`.
+
+**Errors:** `NO_ACTIVE_RUNTIME`; `AMBIGUOUS_RUNTIME`; `CAPABILITY_UNAVAILABLE`.
+
+### `openxr_get_head_pose`
+
+Gets a fresh headset pose. Always call it again when the current pose matters; the user may have moved.
+
+| Argument | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `base_space` | string | `local_floor` | Space to express the pose in |
+| `session_handle` | number | active session | Session to sample |
 
 ```json
 {"position":[0,1.65,0],"orientation":[0,0,0,1],"position_valid":true,"orientation_valid":true,"position_tracked":true,"orientation_tracked":true,"active":true,"simulated":false,"base_space":"local_floor","sample_time_ns":9876543210}
 ```
 
-`linear_velocity` and `angular_velocity` arrays appear when the runtime reports them. `simulated` is true while an MCP pose override supplies the value. `openxr_get_controller_pose` returns the same shape plus `hand` and `pose_type`. An inactive controller returns `active: false` when the runtime reports it as inactive; otherwise a pose that is not available fails with `POSE_INVALID`.
+- `*_valid` says the component is usable; `*_tracked` says it is currently tracked rather than held or estimated.
+- `simulated` is true while an [`openxr_set_head_pose`](#openxr_set_head_pose) override supplies the pose.
+- `linear_velocity` and `angular_velocity` arrays follow `simulated` when the runtime reports them.
 
-`openxr_get_active_interaction_profile` returns `{"hand":"left","interaction_profile":"/interaction_profiles/valve/index_controller"}` for one hand, or `{"left":{"interaction_profile":…},"right":{"interaction_profile":…}}` for both. A `null` profile means none is currently selected.
+**Errors:** `CAPABILITY_UNAVAILABLE` while the headset is inactive or has not reported a pose; `SPACE_UNSUPPORTED` for `local`; `POSE_INVALID` when the head pose is inactive or not valid.
 
-### Scene and capture
+### `openxr_get_controller_pose`
 
-`openxr_list_spatial_entities` is listed for compatibility, but the current server has no scene source: with an active session it always returns `CAPABILITY_UNAVAILABLE`. Do not retry it in a loop.
+Gets a fresh grip or aim pose for one controller. A simulated pose matches what the application observes.
 
-`openxr_capture_composited_image` returns the final composited image for one eye as a base64 PNG, without a `data:` prefix:
+| Argument | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `hand` | string | required | `left` or `right` |
+| `pose_type` | string | `grip` | `grip` or `aim` |
+| `base_space` | string | `local_floor` | Space to express the pose in |
+| `session_handle` | number | active session | Session to sample |
+
+The result has the [head pose](#openxr_get_head_pose) fields followed by `hand` and `pose_type`, then `base_space` and `sample_time_ns`. A controller that PortalVR knows but that is currently disconnected returns successfully with `active: false`.
+
+**Errors:** `CAPABILITY_UNAVAILABLE` when PortalVR reports no controller profile, and for `aim` except on a focused OpenXR application; `SPACE_UNSUPPORTED`; `POSE_INVALID` when an active controller's pose is not valid.
+
+### `openxr_get_active_interaction_profile`
+
+Gets the interaction profile bound for one or both hands. Use it to see which controls can drive the application.
+
+| Argument | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `hand` | string | `both` | `left`, `right`, or `both` |
+| `session_handle` | number | active session | Session to read |
+
+```json
+{"hand":"left","interaction_profile":"/interaction_profiles/oculus/touch_controller"}
+```
+
+With `hand: "both"` the result is `{"left":{"interaction_profile":…},"right":{"interaction_profile":…}}`. `null` means no profile is currently bound. PortalVR's controllers report `/interaction_profiles/oculus/touch_controller`, `/interaction_profiles/valve/index_controller` (Index emulation), or `/interaction_profiles/htc/vive_controller`; a focused OpenXR application reports the profile its runtime bound.
+
+**Errors:** `CAPABILITY_UNAVAILABLE` when no controller profile is known.
+
+### `openxr_list_spatial_entities`
+
+Would list physical-environment entities such as floors, walls, and tables. It is listed for compatibility, but the current server has no scene source.
+
+| Argument | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `base_space` | string | `local_floor` | Space for entity poses |
+| `session_handle` | number | active session | Session to query |
+
+**Errors:** with an active session it always returns `CAPABILITY_UNAVAILABLE`; do not retry it in a loop. Without one it returns `NO_ACTIVE_SESSION`.
+
+### `openxr_capture_composited_image`
+
+Captures the final composited image for one eye, after PortalVR's compositor, as a PNG.
+
+| Argument | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `eye` | string | `left` | `left` or `right` |
+| `session_handle` | number | active session | Session to capture |
 
 ```json
 {"content":[{"type":"image","data":"iVBORw0KGgo…","mimeType":"image/png"}],"structuredContent":{"eye":"left","width":1920,"height":1920,"format":"RGBA8_SRGB","frame_id":1234,"capture_time_utc":"2026-08-22T18:00:00.000Z","_portalvr":{"source_width":1920,"source_height":1920,"downscaled":false}},"isError":false}
 ```
 
-Images larger than `capture_max_dimension`, or whose PNG would exceed the 12 MiB size limit, are downscaled, which `_portalvr.downscaled` reports. Setting `capture_max_png_bytes` above 12 MiB has no effect. Captures are limited by `limits.capture_per_second`. In a 2D PortalVR session, see [eye capture in 2D mode](#eye-capture-in-2d-mode).
+- `data` is base64 PNG without a `data:` prefix. Exactly one eye is returned.
+- Images larger than `capture_max_dimension`, or whose PNG would exceed 12 MiB, are downscaled; `_portalvr.source_width`, `source_height`, and `downscaled` report it. Setting `capture_max_png_bytes` above 12 MiB has no effect.
+- Captures are limited to `limits.capture_per_second` and one at a time per client.
+- In a 2D PortalVR session both eyes show the same image until the [two-eye restart](#eye-capture-in-2d-mode).
 
-### Input and pose control
+**Errors:** `CAPABILITY_UNAVAILABLE` until the session has frames and a capture source; `CAPTURE_FAILED`.
 
-`openxr_set_controller_input` sets one control on the [active controller](#controllers-for-input-and-pose-control):
+### `math_calc`
+
+Evaluates one scalar expression safely. Vectors are not supported.
+
+| Argument | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `expression` | string | required | The expression |
+
+`{"expression":"sqrt(2) * sin(pi / 4) + max(1, 2, 3)"}` returns `{"result":4}`.
+
+The grammar has numbers, `+ - * /`, unary minus, `**` for exponentiation, parentheses, the constants `pi` and `e`, and the functions `abs`, `sqrt`, `exp`, `log` (natural), `log10`, `pow`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `floor`, `ceil`, `round`, `min`, and `max`. Angles are radians.
+
+**Errors:** `EXPRESSION_ERROR` for `^`, `%`, variables, unknown functions, syntax errors, division by zero, and non-finite results.
+
+### `math_dot`
+
+Computes the dot product of two 3-vectors.
+
+| Argument | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `vector_a` | 3 numbers | required | First vector |
+| `vector_b` | 3 numbers | required | Second vector |
+
+`{"vector_a":[1,2,3],"vector_b":[4,5,6]}` returns `{"result":32}`.
+
+**Errors:** `INVALID_ARGUMENT` when a vector does not have exactly three finite numbers.
+
+### `math_cross`
+
+Computes the right-handed cross product `vector_a × vector_b`.
+
+| Argument | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `vector_a` | 3 numbers | required | First vector |
+| `vector_b` | 3 numbers | required | Second vector |
+
+`{"vector_a":[1,0,0],"vector_b":[0,1,0]}` returns `{"result":[0,0,1]}`.
+
+**Errors:** `INVALID_ARGUMENT` as for `math_dot`.
+
+### `math_add`, `math_sub`, `math_mul`, `math_div`
+
+Add, subtract (`a − b`), multiply, or divide (`a ÷ b`) componentwise.
+
+| Argument | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `a` | number or 3 numbers | required | First operand |
+| `b` | number or 3 numbers | required | Second operand |
+
+Two numbers give a number. Two vectors combine per component. A number and a vector apply the number to each component, keeping operand order: `math_sub` with `{"a":10,"b":[1,2,3]}` returns `{"result":[9,8,7]}`, and `math_div` with `{"a":[2,4,6],"b":2}` returns `{"result":[1,2,3]}`.
+
+**Errors:** `INVALID_ARGUMENT` for a wrong-length vector; `DIVIDE_BY_ZERO` from `math_div` when any divisor component is zero.
+
+### `math_build_quat`
+
+Builds the quaternion whose local −Z faces `front_direction` and whose local +Y follows `up_direction` as closely as possible.
+
+| Argument | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `front_direction` | 3 numbers | required | Direction for local −Z; normalized first |
+| `up_direction` | 3 numbers | `[0,1,0]` | Approximate local +Y; normalized first |
+| `return_basis_vectors` | boolean | `false` | Also return the orthonormal basis |
+
+`{"front_direction":[1,0,0],"return_basis_vectors":true}` returns:
+
+```json
+{"quaternion":[0,-0.7071067811865475,0,0.7071067811865476],"front_direction":[1,0,0],"up_direction":[0,1,0],"right_direction":[0,0,1]}
+```
+
+Without `return_basis_vectors`, only `quaternion` is returned.
+
+**Errors:** `INVALID_ARGUMENT` when either direction is zero or the two are parallel.
+
+### `math_decompose_quat`
+
+Returns the directions of a quaternion's local axes: front (−Z), up (+Y), and right (+X).
+
+| Argument | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `quaternion` | 4 numbers | required | `[x, y, z, w]`; normalized first |
+
+`{"quaternion":[0,0,0,1]}` returns `{"front_direction":[0,0,-1],"up_direction":[0,1,0],"right_direction":[1,0,0]}`.
+
+**Errors:** `INVALID_ARGUMENT` for a zero or non-finite quaternion.
+
+### `openxr_set_controller_input`
+
+Sets one button, trigger, grip, or thumbstick axis on the [active controller](#controllers-for-input-and-pose-control), optionally returning it to zero after a hold.
+
+| Argument | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `hand` | string | required | `left` or `right` |
+| `component` | string | required | Control; see the table below |
+| `value` | number | required | Buttons exactly `0` or `1`; `Trigger` and `Grip` in `[0, 1]`; `Thumbstick` in `[-1, 1]` |
+| `sub_component` | string | none | `X` or `Y`; required for `Thumbstick`, forbidden otherwise |
+| `auto_release` | boolean | `false` | Return the control to zero after `hold_duration` |
+| `hold_duration` | number | `0.2` | Seconds to hold when `auto_release` is true, `0.001` to `60` |
+| `session_handle` | number | active session | Session to drive |
 
 | Hand | `component` values |
 | --- | --- |
 | `left` | `X`, `Y`, `Menu`, `Thumbstick`, `ThumbstickClick`, `Trigger`, `Grip` |
 | `right` | `A`, `B`, `System`, `Thumbstick`, `ThumbstickClick`, `Trigger`, `Grip` |
 
-Buttons take exactly `0` or `1`; `Trigger` and `Grip` take `[0, 1]`; `Thumbstick` takes `[-1, 1]` and requires `sub_component` `X` or `Y`, which is forbidden for other components. With `auto_release: true`, the control returns to zero after `hold_duration` seconds (default `0.2`, range `0.001` to `60`). Without it, the value holds until changed.
+Without `auto_release`, the value holds until changed or [cleared](#override-lifetime).
 
 ```json
-{"session_handle":42,"hand":"right","component":"Trigger","sub_component":null,"value":1,"auto_release":true,"release_time_ns":9876743210,"applied":true,"observable_state_sequence":4822,"_portalvr":{"component_path":"/input/trigger/value","controller_type":"…","legacy_binding_installed":true,"visibility":"binding_dependent"}}
+{"session_handle":42,"hand":"right","component":"Trigger","sub_component":null,"value":1,"auto_release":true,"release_time_ns":9876743210,"applied":true,"observable_state_sequence":4822,"_portalvr":{"component_path":"/input/trigger/value","controller_type":"oculus_touch","legacy_binding_installed":true,"visibility":"binding_dependent"}}
 ```
 
-`applied` means the runtime accepted the value. Whether the application reacts depends on its input bindings; `_portalvr.visibility` is `binding_dependent` for ordinary controls and `runtime_only` for `System`, which SteamVR reserves.
+- `release_time_ns` is `null` without `auto_release`.
+- `applied` means SteamVR accepted the value. Whether the application reacts depends on its input bindings.
+- `_portalvr.component_path` is the SteamVR input path that was set; it depends on the controller, for example `/input/joystick/x` on Touch and `/input/thumbstick/x` on Index.
+- `_portalvr.controller_type` is `oculus_touch`, `knuckles` (Index), `vive_controller`, `portalvr`, or `unknown`. `legacy_binding_installed` says a controller profile is known for that hand.
+- `_portalvr.visibility` is `binding_dependent` for ordinary controls and `runtime_only` for `System`, which SteamVR reserves. Injecting `System` normally opens the SteamVR dashboard, which [clears all overrides](#override-lifetime).
 
-`openxr_set_head_pose` and `openxr_set_controller_pose` override a pose. Supply `position`, `orientation`, or both; an omitted component keeps its current value. `duration_seconds` (range `0` to `60`, default `0`) interpolates to the target instead of jumping. For a focused OpenXR application, SteamVR derives both grip and aim from one controller origin, so a `pose_type: "aim"` controller override moves that origin, and the result still reports `aim`; see [SteamVR limits](#conventions) for other applications. Both return the following; a controller result also has `hand` and `pose_type` after `target`:
+**Errors:** `INVALID_ARGUMENT` for a component that does not exist on that hand, a value out of range, or a missing or forbidden `sub_component`; `CAPABILITY_UNAVAILABLE` when no controller is active; `INPUT_UNSUPPORTED` when the active controller lacks the control.
+
+### `openxr_set_head_pose`
+
+Overrides all or part of the headset pose, instantly or with smooth interpolation. The application observes the simulated pose.
+
+| Argument | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `position` | 3 numbers | current | Target position in metres, in `base_space` |
+| `orientation` | 4 numbers | current | Target orientation quaternion |
+| `base_space` | string | `local_floor` | Space of the target |
+| `duration_seconds` | number | `0` | Interpolation time, `0` to `60`; `0` jumps |
+| `session_handle` | number | active session | Session to drive |
+
+Supply `position`, `orientation`, or both. Moving the head moves the whole simulated rig: controllers and hands keep their live motion relative to the physical head but follow it to the new head pose. A head target in `view` space is applied relative to the view at the moment the command takes effect. Interpolation is linear for position and normalized shortest-arc for orientation.
 
 ```json
 {"session_handle":42,"target":"head","target_pose":{"position":[0,1.7,0],"orientation":[0,0,0,1]},"base_space":"local_floor","duration_seconds":0,"applied":true,"simulated":true,"observable_state_sequence":4823}
 ```
 
-A new call replaces the previous override for the same target, starting from the currently effective pose. An override lasts until it is replaced, the XR session ends, MCP control is released (for example when the server stops), or **Emergency MCP Clear** is used. PortalVR also clears every override and held input at once when the SteamVR dashboard opens or closes, a PortalVR controller is deactivated, the headset becomes inactive, or the scene application changes. Physical tracking then resumes immediately. Injecting right-hand `System` normally opens the dashboard, so it clears all overrides too. Overrides and held inputs survive the disconnect of the client that set them, so a test harness should restore or clear them itself.
+`target_pose` is the full resolved target, including any component you omitted.
 
-Setting the head pose moves the whole simulated rig: controllers and hands keep their live motion relative to the physical head but follow it to the new head pose. A controller override applies after the rig move and wins for that controller. A head target in `view` space is applied relative to the view at the moment the command takes effect.
+**Errors:** `INVALID_ARGUMENT` when neither `position` nor `orientation` is supplied or a value is out of range; `CAPABILITY_UNAVAILABLE` while the headset is inactive; `SPACE_UNSUPPORTED` for `local`.
 
-### Coordinate and math tools
+### `openxr_set_controller_pose`
 
-`math_*` and the two Unity conversion tools need no XR application; `openxr_convert_pose_between_spaces` needs an active session.
+Overrides all or part of one controller's grip or aim pose, instantly or with smooth interpolation.
 
-`convert_unity_pose_to_openxr` and `convert_openxr_pose_to_unity` convert between Unity's left-handed convention and OpenXR's right-handed one by mirroring Z. They are the same involutive transform: position `[x, y, z]` becomes `[x, y, -z]`, and a unit quaternion `[x, y, z, w]` becomes `[-x, -y, z, w]` (output quaternions are normalized, with `w ≥ 0`). Supply `position`, `orientation`, or both; only supplied components are returned.
+| Argument | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `hand` | string | required | `left` or `right` |
+| `pose_type` | string | `grip` | `grip` or `aim` |
+| `position`, `orientation`, `base_space`, `duration_seconds`, `session_handle` | | | As for [`openxr_set_head_pose`](#openxr_set_head_pose) |
 
-`openxr_convert_pose_between_spaces` expresses the input pose, given in `source_space`, in `target_space`. For a focused OpenXR application it can only use spaces the application created, so even the default conversion can return `SPACE_UNSUPPORTED`. It returns `source_space`, `target_space`, `position`, `orientation`, `position_valid`, `orientation_valid`, and `sample_time_ns`.
+The result matches the head-pose result with `target: "controller"` and `hand` and `pose_type` after `target`. A controller override applies after any head-rig move and wins for that controller; a target in `view` follows the simulated head.
 
-| Tool | Example arguments | Result |
-| --- | --- | --- |
-| `math_calc` | `{"expression":"2 + 3 * 4"}` | `{"result":14}` |
-| `math_dot` | `{"vector_a":[1,2,3],"vector_b":[4,5,6]}` | `{"result":32}` |
-| `math_cross` | `{"vector_a":[1,0,0],"vector_b":[0,1,0]}` | `{"result":[0,0,1]}` |
-| `math_add`, `math_sub`, `math_mul`, `math_div` | `{"a":[1,2,3],"b":2}` | `{"result":…}` |
-| `math_build_quat` | `{"front_direction":[1,0,0],"return_basis_vectors":true}` | `{"quaternion":[0,-0.7071067811865475,0,0.7071067811865476],"front_direction":[1,0,0],"up_direction":[0,1,0],"right_direction":[0,0,1]}` |
-| `math_decompose_quat` | `{"quaternion":[0,0,0,1]}` | `{"front_direction":[0,0,-1],"up_direction":[0,1,0],"right_direction":[1,0,0]}` |
+For a focused OpenXR application, SteamVR derives both grip and aim from one controller origin, so an `aim` override moves that origin and the result still reports `aim`. For other applications `aim` overrides are unavailable.
 
-`math_calc` evaluates one scalar expression with `+ - * /`, unary minus, `**` for exponentiation, parentheses, the constants `pi` and `e`, and the functions `abs`, `sqrt`, `exp`, `log`, `log10`, `pow`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `floor`, `ceil`, `round`, `min`, and `max`. `^` and `%` are invalid, and division by zero inside an expression is an `EXPRESSION_ERROR`. The arithmetic tools take a number or a 3-vector for each operand and apply per component.
+**Errors:** as for `openxr_set_head_pose`, plus `CAPABILITY_UNAVAILABLE` when no controller is active on that hand or for `aim` outside a focused OpenXR application.
 
-`math_build_quat` returns the rotation whose local −Z faces `front_direction`, with `up_direction` as the approximate up; both are normalized first. Basis vectors appear only when `return_basis_vectors` is true. `math_decompose_quat` returns the rotated −Z, +Y, and +X axes.
+#### Override lifetime
+
+A new override replaces the previous one for the same target, starting from the currently effective pose. An override or held input lasts until it is replaced, the XR session ends, MCP control is released (for example when the server stops), or **Emergency MCP Clear** is used. PortalVR also clears every override and held input at once when the SteamVR dashboard opens or closes, a PortalVR controller is deactivated, the headset becomes inactive, or the scene application changes. Physical tracking then resumes immediately.
+
+Overrides and held inputs survive the disconnect of the client that set them, so a test harness should restore or clear them itself.
+
+### `convert_unity_pose_to_openxr`, `convert_openxr_pose_to_unity`
+
+Convert a position and/or quaternion between Unity's left-handed convention and OpenXR's right-handed one. They need no XR application.
+
+| Argument | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `position` | 3 numbers | none | Position to convert |
+| `orientation` | 4 numbers | none | Quaternion to convert |
+
+Both tools apply the same Z-mirroring transform: position `[x, y, z]` becomes `[x, y, -z]`, and quaternion `[x, y, z, w]` becomes `[-x, -y, z, w]` after normalization, with `w ≥ 0`. Only supplied components are returned. `convert_unity_pose_to_openxr` with `{"position":[1,2,3],"orientation":[0,0.7071068,0,0.7071068]}` returns:
+
+```json
+{"position":[1,2,-3],"orientation":[0,-0.7071067811865475,0,0.7071067811865475]}
+```
+
+**Errors:** `INVALID_ARGUMENT` when neither component is supplied or a quaternion is zero.
+
+### `openxr_convert_pose_between_spaces`
+
+Expresses a pose given in one reference space in another, using fresh tracking data. With no pose, it converts the source space's origin.
+
+| Argument | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `source_space` | string | `local_floor` | Space the input pose is in |
+| `target_space` | string | `stage` | Space to express it in |
+| `position` | 3 numbers | `[0,0,0]` | Input position |
+| `orientation` | 4 numbers | `[0,0,0,1]` | Input orientation |
+| `session_handle` | number | active session | Session whose spaces to use |
+
+```json
+{"source_space":"view","target_space":"local_floor","position":[0,1.65,0],"orientation":[0,0,0,1],"position_valid":true,"orientation_valid":true,"sample_time_ns":9876543210}
+```
+
+Through SteamVR, `stage` and `local_floor` are the same space, so converting between them returns the input unchanged, and `local` is unsupported. A focused OpenXR application converts with its own OpenXR spaces and can use only the spaces it created, so even the default conversion can return `SPACE_UNSUPPORTED`.
+
+**Errors:** `CAPABILITY_UNAVAILABLE` until the headset reports a pose; `SPACE_UNSUPPORTED`; `POSE_INVALID` when the converted pose is not valid.
 
 ## Application custom tools
 
