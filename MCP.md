@@ -370,7 +370,7 @@ The examples below omit `_portalvr` unless a tool returns different fields. The 
 
 ### Tool index
 
-Annotations: **R** read-only, **D** destructive, **I** idempotent, **W** open-world (depends on or affects the live XR application). Bold arguments are required.
+Annotations: **R** read-only, **D** destructive, **I** idempotent, **W** open-world (the `openWorldHint` annotation: the result depends on live tracking or the call affects what the application observes). Bold arguments are required.
 
 | Tool | Arguments | Annotations | Needs |
 | --- | --- | --- | --- |
@@ -400,7 +400,7 @@ Annotations: **R** read-only, **D** destructive, **I** idempotent, **W** open-wo
 | [`convert_openxr_pose_to_unity`](#convert_openxr_pose_to_unity) | `position`, `orientation` | R I | Nothing |
 | [`openxr_convert_pose_between_spaces`](#openxr_convert_pose_between_spaces) | `source_space`, `target_space`, `position`, `orientation`, `session_handle` | R W | Session with a head pose |
 
-"Runtime" means a connected SteamVR runtime, with or without a running application. "Known controller" means PortalVR reports a controller profile for that hand; "active controller" means that controller is currently connected. See [controllers for input and pose control](#controllers-for-input-and-pose-control).
+"Runtime" means a connected SteamVR runtime, with or without a running application. "Known controller" means a controller has been active on that hand since SteamVR started; "active controller" means that controller is currently connected. See [controllers for input and pose control](#controllers-for-input-and-pose-control).
 
 ### `openxr_get_instance_info`
 
@@ -520,7 +520,7 @@ Gets a fresh grip or aim pose for one controller. A simulated pose matches what 
 
 The result has the [head pose](#openxr_get_head_pose) fields followed by `hand` and `pose_type`, then `base_space` and `sample_time_ns`. A controller that PortalVR knows but that is currently disconnected returns successfully with `active: false`.
 
-**Errors:** `CAPABILITY_UNAVAILABLE` when PortalVR reports no controller profile, and for `aim` except on a focused OpenXR application; `SPACE_UNSUPPORTED`; `POSE_INVALID` when an active controller's pose is not valid.
+**Errors:** `CAPABILITY_UNAVAILABLE` when no controller has been active on that hand, while the headset has no pose, and for `aim` except on a focused OpenXR application; `SPACE_UNSUPPORTED`; `POSE_INVALID` when an active controller's pose is not valid. An `aim` read on a focused OpenXR application uses the application's own spaces: it returns `SPACE_UNSUPPORTED` if the application never created `base_space` (including the default `local_floor`), and `CAPABILITY_UNAVAILABLE` if it has no aim action.
 
 ### `openxr_get_active_interaction_profile`
 
@@ -535,7 +535,7 @@ Gets the interaction profile bound for one or both hands. Use it to see which co
 {"hand":"left","interaction_profile":"/interaction_profiles/oculus/touch_controller"}
 ```
 
-With `hand: "both"` the result is `{"left":{"interaction_profile":…},"right":{"interaction_profile":…}}`. `null` means no profile is currently bound. PortalVR's controllers report `/interaction_profiles/oculus/touch_controller`, `/interaction_profiles/valve/index_controller` (Index emulation), or `/interaction_profiles/htc/vive_controller`; a focused OpenXR application reports the profile its runtime bound.
+With `hand: "both"` the result is `{"left":{"interaction_profile":…},"right":{"interaction_profile":…}}`. `null` means no profile is currently bound, including for a hand whose controller has disconnected. PortalVR's controllers report, for example, `/interaction_profiles/oculus/touch_controller`, `/interaction_profiles/valve/index_controller` (Index emulation), or `/interaction_profiles/htc/vive_controller`; a focused OpenXR application reports the profile its runtime bound.
 
 **Errors:** `CAPABILITY_UNAVAILABLE` when no controller profile is known.
 
@@ -580,7 +580,7 @@ Evaluates one scalar expression safely. Vectors are not supported.
 
 `{"expression":"sqrt(2) * sin(pi / 4) + max(1, 2, 3)"}` returns `{"result":4}`.
 
-The grammar has numbers, `+ - * /`, unary minus, `**` for exponentiation, parentheses, the constants `pi` and `e`, and the functions `abs`, `sqrt`, `exp`, `log` (natural, or `log(x, base)`), `log10`, `pow`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `floor`, `ceil`, `round` (ties to even; optionally `round(x, digits)` with an integer `digits` from −15 to 15), `min`, and `max`. Angles are radians.
+The grammar has numbers, `+ - * /`, unary minus, `**` for exponentiation, parentheses, the constants `pi` and `e`, and the functions `abs`, `sqrt`, `exp`, `log` (natural, or `log(x, base)`), `log10`, `pow`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `floor`, `ceil`, `round` (ties to even; optionally `round(x, digits)` with an integer `digits` from −15 to 15), `min`, and `max`. Angles are radians. An expression may have at most 256 tokens and 32 levels of nesting, and exponents are limited to a magnitude of 1024.
 
 **Errors:** `EXPRESSION_ERROR` for `^`, `%`, variables, unknown functions, syntax errors, division by zero, and non-finite results.
 
@@ -832,12 +832,22 @@ XrResult callback(char *resultBuffer, uint32_t resultBufferCapacityInput,
                   uint32_t *resultBufferCountOutput, const char *parameters, void *userData);
 ```
 
-- Tool names must match `^[A-Za-z0-9_.-]{1,63}$`. Names beginning `openxr_`, `math_`, `convert_`, or `portalvr.` are reserved, and duplicate names in one instance fail.
+- Tool names, parameter names, and the keys of `objectProperties` must all match `^[A-Za-z0-9_.-]{1,63}$` and must not begin with the reserved prefixes `openxr_`, `math_`, `convert_`, or `portalvr.`. Duplicate tool names in one instance, and duplicate parameter names in one tool, fail.
+- Tool and parameter descriptions are at most 1023 bytes of UTF-8. A tool has at most 256 parameters, and an instance at most 256 tools.
+- An `array` parameter's `arrayItemType` must be string, number, boolean, or array, not object.
+- An `object` parameter's `objectProperties` is a JSON object mapping property names to schemas. Those schemas may use only `type`, `description`, `title`, `enum`, `items`, `properties`, `required`, and `additionalProperties` (a boolean), nested at most 16 levels with at most 256 properties in total.
+- Registration fails with `XR_ERROR_VALIDATION_FAILURE` for a rule violation, `XR_ERROR_FUNCTION_UNSUPPORTED` when the extension was not enabled, and `XR_ERROR_LIMIT_REACHED` beyond 256 tools.
 - Registered tools follow the built-ins in `tools/list`, in registration order, and are listed and callable only while the application's session is focused and selected. Their schemas are objects with `additionalProperties: false` built from the parameter descriptors.
 - Tools are retired when the instance is destroyed or the application disconnects; version 1 has no unregister call.
 - `parameters` is the call's arguments as JSON text. The layer calls the callback twice, in the usual OpenXR two-call pattern: first with a null buffer and zero capacity to read the required size, then with a buffer of exactly that size. The count includes the terminating NUL, and the result may be up to 1 MiB.
 - The result must be JSON. An object becomes the tool result as is; any other JSON value is wrapped as `{"result": …}`. A failing callback, a size mismatch, or invalid JSON is reported as `CUSTOM_TOOL_ERROR`, and calls have a 10-second deadline.
-- `toolCallbackInfoFlags` chooses the thread. With no flag, the callback runs on a layer worker thread. With `XR_AGENTIC_EXTERNAL_TOOL_CALLBACK_INFO_APPLICATION_MAIN_THREAD_BIT_METAX1` it runs inside the application's `xrPollEvent` calls; with `XR_AGENTIC_EXTERNAL_TOOL_CALLBACK_INFO_RENDERING_MAIN_THREAD_BIT_METAX1` it runs inside `xrWaitFrame`. Setting both fails registration with `XR_ERROR_VALIDATION_FAILURE`.
+- Because the callback runs twice per call, perform side effects only once, and return the same size both times.
+- `toolCallbackInfoFlags` chooses the thread:
+  - **No flag:** the callback runs on a layer worker thread, concurrently with the application.
+  - **`XR_AGENTIC_EXTERNAL_TOOL_CALLBACK_INFO_APPLICATION_MAIN_THREAD_BIT_METAX1`:** the callback runs on the thread that called `xrCreateInstance`, inside that thread's calls to `xrPollEvent`, `xrSyncActions`, `xrGetSystem`, `xrGetSystemProperties`, `xrCreateSession`, `xrBeginSession`, `xrEndSession`, or `xrRequestExitSession`.
+  - **`XR_AGENTIC_EXTERNAL_TOOL_CALLBACK_INFO_RENDERING_MAIN_THREAD_BIT_METAX1`:** the callback runs on the first thread whose `xrWaitFrame` succeeded, inside its calls to `xrWaitFrame`, `xrBeginFrame`, or `xrEndFrame`.
+  - Setting both fails registration with `XR_ERROR_VALIDATION_FAILURE`.
+  - If the application never makes those calls on the bound thread (for example, it polls events on a different thread from the one that created the instance), the callback never runs and every call fails after the 10-second deadline.
 
 ## Recovery
 
