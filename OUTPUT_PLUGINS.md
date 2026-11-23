@@ -1,4 +1,4 @@
-# PortalVR plugins
+# PortalVR output plugins
 
 This is the authoritative reference for PortalVR's output-plugin interface,
 ABI **1.0**, Windows x64 SteamVR host. It covers installation and operation,

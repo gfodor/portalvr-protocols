@@ -1,6 +1,6 @@
-# PortalVR tracker and phone-controller protocols
+# PortalVR phone-controller protocol
 
-This document describes how to receive tracking and input from the PortalVR iOS tracker and the iOS/Android **phone controller** apps, and how to send their supported host commands. It covers the current source implementations, including differences between platforms. Headset mode and its transport are outside scope.
+This document describes how to receive pose and input from the PortalVR iOS and Android **phone controller** apps, and how to send their supported host commands. Install either app from [portalvr.io/controller](https://portalvr.io/controller), the link encoded by PortalVR's phone-setup QR code. It covers the current source implementations, including differences between platforms. The camera tracker has its own protocol in [TRACKER.md](TRACKER.md). Headset mode and its transport are outside scope.
 
 All offsets below are in bytes, starting at zero. All multibyte payload fields are **little-endian**, with no alignment padding. `f32` and `f64` mean IEEE-754 binary32 and binary64; `u8/u16/u32/u64` mean unsigned integers. Lengths exclude transport headers unless stated otherwise.
 
@@ -11,8 +11,6 @@ All offsets below are in bytes, starting at zero. All multibyte payload fields a
 - [Android phone USB connection](#android-phone-usb-connection)
 - [Phone-controller state](#phone-controller-state)
 - [Phone-controller commands](#phone-controller-commands)
-- [Tracker POSE packets](#tracker-pose-packets)
-- [Tracker clock synchronization and calibration](#tracker-clock-synchronization-and-calibration)
 - [Reference receiver code](#reference-receiver-code)
 - [Integration checklist and troubleshooting](#integration-checklist-and-troubleshooting)
 - [Compatibility notes](#compatibility-notes)
@@ -21,13 +19,12 @@ All offsets below are in bytes, starting at zero. All multibyte payload fields a
 
 | App | What the host receives | Device endpoint | Transport framing | Startup |
 | --- | --- | --- | --- | --- |
-| iOS tracker (`ios-controller-tracking`) | Camera-derived hand/body anchors, optional 21 hand landmarks, acquisition state and timing | TCP port **5005** through USBMux | `PUSB` | Connect; respond to clock requests |
-| iOS phone controller (`portal-controller-ios`) | Phone pose, buttons, joystick, virtual-wand mode, tracking status | TCP port **5006** through USBMux | `PUSB` | Connect; state starts automatically |
-| Android phone controller (`portal-controller-android`) | Same common controller fields, plus a fixed extension | Android Open Accessory bulk endpoints | Raw typed packets, **no length prefix** | Host writes byte `01` to start state streaming |
+| [iOS phone controller](https://portalvr.io/controller) (`portal-controller-ios`) | Phone pose, buttons, joystick, virtual-wand mode, tracking status | TCP port **5006** through USBMux | `PUSB` | Connect; state starts automatically |
+| [Android phone controller](https://portalvr.io/controller) (`portal-controller-android`) | Same common controller fields, plus a fixed extension | Android Open Accessory bulk endpoints | Raw typed packets, **no length prefix** | Host writes byte `01` to start state streaming |
 
-The tracker observes the user's hands from a camera. A phone controller uses the phone itself as the tracked object. Neither stream is automatically a desktop gamepad or a VR driver: the receiving program must map measurements and inputs into its target API, establish an origin, and handle stale tracking.
+A phone controller uses the phone itself as the tracked object; the [camera tracker](TRACKER.md) instead observes the user's hands from a camera. Neither stream is automatically a desktop gamepad or a VR driver: the receiving program must map measurements and inputs into its target API, establish an origin, and handle stale tracking.
 
-The controller apps do **not** currently send identical packets: iOS sends version `03`, 67 bytes; Android phone mode sends version `09`, 171 bytes. Their first 67 bytes have the same field layout. The tracker has a separate `POSE` protocol; its version `10` is unrelated to controller packet type `10`.
+The controller apps do **not** currently send identical packets: iOS sends version `03`, 67 bytes; Android phone mode sends version `09`, 171 bytes. Their first 67 bytes have the same field layout. The tracker's `POSE` protocol is separate; its version `10` is unrelated to controller packet type `10`.
 
 ### Supported connectivity
 
@@ -39,18 +36,20 @@ The iOS listeners use ordinary TCP without TLS and do not explicitly bind to loo
 
 ## iOS connection and framing
 
+The iOS phone controller and the iOS [camera tracker](TRACKER.md) share this connection and framing layer; they differ in device port and payloads.
+
 The **phone listens**, and the host initiates the connection. Each iOS listener keeps one active client; a new client replaces the old connection. No application handshake, subscription message, or state acknowledgement is required.
 
-The controller UI calls its local connection `PORTAL-USB`; this is a synthetic UI name, not a Bluetooth advertisement or a hostname. The tracker enables its listener during camera-view setup.
+The controller UI calls its local connection `PORTAL-USB`; this is a synthetic UI name, not a Bluetooth advertisement or a hostname.
 
 ### Connecting through USBMux
 
-A host may use an existing USBMux port forwarder or implement the short USBMux setup below. The reference code later in this file implements it using only Python's standard library.
+A host may use an existing USBMux port forwarder or implement the short USBMux setup below. The [reference code](#reference-receiver-code) later in this file implements it using only Python's standard library.
 
 1. Connect to the host USBMux daemon: normally `/var/run/usbmuxd` on macOS/Linux, or `127.0.0.1:27015` with Apple Mobile Device Support on Windows.
 2. Send an XML property list with `MessageType="ListDevices"`, `ClientVersionString`, and `ProgName`. Each daemon message has a 16-byte header: four `u32` values, `[total_length_including_header, 1, 8, tag]`.
 3. Read the response property list and select an entry in `DeviceList` whose `Properties.ConnectionType` is `USB`. Preserve its numeric `DeviceID`; `Properties.SerialNumber` identifies the device when several are attached.
-4. Open a fresh daemon connection. Send a `Connect` property list with `DeviceID` and `PortNumber`, plus the client strings. **PortNumber is the byte-swapped 16-bit device port**, e.g. Python `socket.htons(5005)`, despite the daemon message header being little-endian.
+4. Open a fresh daemon connection. Send a `Connect` property list with `DeviceID` and `PortNumber`, plus the client strings. **PortNumber is the byte-swapped 16-bit device port**, e.g. Python `socket.htons(5006)`, despite the daemon message header being little-endian.
 5. Read the daemon response. `Number == 0` means success. That same socket now carries the app's TCP byte stream; stop interpreting bytes as daemon messages.
 
 The daemon protocol and `PUSB` protocol are different layers. Device ports 5005/5006 are not the daemon's port 27015. To reconnect, obtain a current device ID and open a new tunnel. The bundled tracker host transport also honors `USBMUXD_SOCKET_ADDRESS` as a Unix path or `host:port`.
@@ -75,8 +74,6 @@ Both apps also accept host messages with the legacy `[u32 payload_length][payloa
 The app decoders temporarily interpret a partial `PUSB` header shorter than 12 bytes as a legacy length. Once the rest arrives, they re-evaluate the header; a compatible host should simply wait for the full header instead of allocating memory from those first four bytes. Unknown framing versions are not negotiated.
 
 ### Scheduling
-
-The tracker sends at the processing pipeline's rate, with separate packets for left and right. It keeps only the newest unsent packet globally, not a queue per hand. Under backpressure, either side's older packet can be overwritten. Sequence gaps and unequal arrival rates are therefore normal.
 
 The iOS controller's default interval is **11 ms** (about 91 packets/s), subject to backpressure and scheduling. It pulls the newest predicted pose at send time. State packets are snapshots, not input events. Repeated pose timestamps are possible even when other fields change. There is no ACK command and no requirement to send keepalives. At most one write is in flight; outgoing control commands have a small queue of up to eight pending writes.
 
@@ -103,7 +100,7 @@ Portal's app requires these **exact, case-sensitive** identity strings:
 | 1 | Model | `PortalController` |
 | 3 | Version | `1.0` |
 
-IDs 2 (description), 4 (URI), and 5 (serial) may describe your host; the app does not use them for matching. The three required strings are checked both in `accessory_filter.xml` and by `UsbAccessoryManager`.
+IDs 2 (description), 4 (URI), and 5 (serial) may describe your host; the app does not use them for matching. PortalVR's own host sends `https://portalvr.io/controller` as the URI, so Android can offer the app's install page when it is not installed. The three required strings are checked both in `accessory_filter.xml` and by `UsbAccessoryManager`.
 
 After the user grants accessory access and the app opens it, write **one raw byte `01`** on the host-to-phone bulk OUT endpoint. Begin reading the phone-to-host bulk IN endpoint continuously. The app starts its send loop on receipt of any nonempty host data, but `01` is the intended host-ready signal. Repeat that startup signal after each new accessory session.
 
@@ -224,9 +221,9 @@ Use trackpad bit 0 as the validity/touch condition. Inactive coordinates may con
 
 Position is the phone camera's AR world position in meters; quaternion order is `xyzw`, identity `(0,0,0,1)`. The source uses ARKit on iOS and ARCore on Android, with a local session origin. No geographic coordinates or inter-device shared origin is transmitted. Host calibration must align this local world with the application's world.
 
-iOS takes ARKit's camera transform and applies a **local +90° Z rotation** to its quaternion (`q_output = q_ARKit * q_Z90`) before prediction. Position is not rotated by that correction. Android uses its predicted pose or ARCore's display-oriented camera pose. Do not apply the iOS correction again or assume the quaternion is the untouched sensor orientation. The phone stream is suitable for 6DoF use; the camera tracker stream below has different axes and no quaternion.
+iOS takes ARKit's camera transform and applies a **local +90° Z rotation** to its quaternion (`q_output = q_ARKit * q_Z90`) before prediction. Position is not rotated by that correction. Android uses its predicted pose or ARCore's display-oriented camera pose. Do not apply the iOS correction again or assume the quaternion is the untouched sensor orientation. The phone stream is suitable for 6DoF use; the [camera tracker](TRACKER.md) stream has different axes and no quaternion.
 
-The pose can be filtered/predicted. On iOS the timestamp is the latest AR frame time aligned to the app's uptime clock (falling back to current uptime when tracking is inactive); predicted pose changes may share a timestamp. Android phone production stamps the sample with `elapsedRealtimeNanos()`. These are **not Unix timestamps and are not synchronized to the host**. The iOS controller does not run the tracker's clock-sync exchange.
+The pose can be filtered/predicted. On iOS the timestamp is the latest AR frame time aligned to the app's uptime clock (falling back to current uptime when tracking is inactive); predicted pose changes may share a timestamp. Android phone production stamps the sample with `elapsedRealtimeNanos()`. These are **not Unix timestamps and are not synchronized to the host**. The iOS controller does not run the tracker's [clock-sync exchange](TRACKER.md#clock-exchange).
 
 Session milliseconds are calculated separately: from TX-loop start on iOS, and from state-client construction on Android. They wrap modulo `2^32` (about 49.7 days), and are not a packet sequence number. Reconnects need not reset every clock or field. Use local receive time for stream staleness and device time for sample intervals; do not subtract unrelated host and phone clock epochs.
 
@@ -265,7 +262,7 @@ These commands do not carry poses or timestamps. Implement recenter using a rece
 
 On Android, **raw `7e`**, one byte, marks orientation reset as completed in the app (`orientationResetSentThisSession=true`). It does not itself rotate the phone's AR world. Do not append a hand selector to the host-to-phone form.
 
-On the iOS controller, a PUSB payload `ORST` (ASCII), or a framed case-insensitive text alias `orst`, `orientation_reset`, `reset_orientation`, or `yaw_reset`, is recognized but **only logged**. It does not apply a pose transform. Raw four-byte `ORST` is also accepted by its framing parser. The one-byte host payload `7e` is not handled as a reset by this controller implementation. This differs from both Android and the iOS tracker.
+On the iOS controller, a PUSB payload `ORST` (ASCII), or a framed case-insensitive text alias `orst`, `orientation_reset`, `reset_orientation`, or `yaw_reset`, is recognized but **only logged**. It does not apply a pose transform. Raw four-byte `ORST` is also accepted by its framing parser. The one-byte host payload `7e` is not handled as a reset by this controller implementation. This differs from both Android and the iOS tracker's [yaw calibration](TRACKER.md#tracker-yaw-calibration).
 
 ### Host → phone: haptics
 
@@ -281,180 +278,11 @@ For example, **`20 80 00 03 64 00 00 00`** requests about half amplitude for 100
 
 Amplitude zero stops/supersedes a pulse. Positive amplitude with duration zero defaults to 50 ms. iOS approximates duration using repeated impact feedback at 35 ms intervals, scales intensity, and caps duration at 500 ms. Android phone vibration clamps positive durations to 40–5000 ms and rate-limits requests. Android decodes the duration into a signed integer internally; keep requests at or below 5000 ms rather than relying on unsigned overflow behavior. Haptics are not acknowledged.
 
-## Tracker POSE packets
-
-### Payload layout
-
-Current tracker emission uses versions **`0e`** and **`10`**, both with a 120-byte base and 24-byte joint records:
-
-`payload_length = 120 + 24 * joint_count`
-
-Version `10` carries hand-local metric landmarks when available. Version `0e` is the current fallback without landmarks. A normal full-hand `10` packet has 21 joints and is **624 bytes**; a fallback or status packet is **120 bytes**.
-
-| Offset | Type | Meaning |
-| ---: | --- | --- |
-| 0 | 4 bytes | ASCII `POSE` (`50 4f 53 45`) |
-| 4 | `u8` | Pose version `0e` or `10` |
-| 5 | `u8` | Joint count |
-| 6 | `u8` | Hand side: `0` status/unknown, `1` left, `2` right |
-| 7 | `u8` | Pose flags, below |
-| 8 | `u32` | Sequence number, wraps modulo `2^32` |
-| 12 | `f64` | Capture timestamp, seconds in device capture timebase |
-| 20 | `f32` | Anchor normalized capture X |
-| 24 | `f32` | Anchor normalized capture Y |
-| 28 | `f32` | Anchor tracker X, meters |
-| 32 | `f32` | Anchor tracker Y, meters |
-| 36 | `f32` | Anchor tracker Z, meters |
-| 40 | `f32` | Anchor confidence |
-| 44 | `f32` | Queue latency, ms |
-| 48 | `f32` | Preprocess latency, ms |
-| 52 | `f32` | Model latency, ms |
-| 56 | `f32` | Inference latency, ms |
-| 60 | `f32` | Pipeline latency, ms |
-| 64 | `f32` | Postprocess latency, ms; builder uses hand-solve + selection |
-| 68 | `f32` | Body-depth latency, ms |
-| 72 | `f32` | Hand-solve latency, ms |
-| 76 | `f32` | Selection latency, ms |
-| 80 | `f32` | Time waiting in transmitter, ms |
-| 84 | `f64` | Phone send uptime, seconds |
-| 92 | `f32` | Estimated host-minus-phone clock offset, ms |
-| 96 | `f32` | Latest clock-sync round trip, ms |
-| 100 | `u16` | Pipeline dropped-frame count, saturated to 65535 |
-| 102 | `u16` | Reserved, zero |
-| 104 | `f32` | X stabilization delta, meters in pre-leveling camera coordinates |
-| 108 | `f32` | Y stabilization delta, same coordinates |
-| 112 | `f32` | Phone pitch hint, radians; **current builder writes zero** |
-| 116 | `u32` | Global app-state flags |
-| 120 | joint records | `joint_count` records of 24 bytes |
-
-Timing stages overlap; do not sum every latency column to calculate end-to-end delay. Dropped-frame telemetry is distinct from transmitter overwrites and sequence gaps. Sequence increments once per constructed packet, including status packets, shared across both hands. Left is constructed before right in a multi-hand frame; do not rely on adjacent arrivals or sequence parity to identify a hand.
-
-### Flags and missing tracking
-
-| Pose flag | Meaning |
-| ---: | --- |
-| `01` | Has 3D anchor |
-| `02` | Has solved 3D skeleton payload |
-| `04` | Synthetic pose began during depth freeze |
-| `08` | Canonical tracker-local joints qualification |
-| `10` | Hand-landmark source (historical name `handIndexSource`) |
-| `20` | TrueDepth capture source |
-| `40` | Synthetic/extrapolated pose |
-| `80` | Recovery blend is active |
-
-The builder sets `08` only for a complete 21-joint hand-landmark result with measured depth, not synthetic or recovery-blended. Version `10` local coordinates are transformed into tracker axes by the current builder even when `08` is clear; the flag additionally distinguishes the fully qualified measured case. It is not safe to infer that an unflagged `10` payload contains old camera-absolute coordinates.
-
-Synthetic packets set `40`, optionally `04`, and clear `01`, `02`, and `08`. Coordinates may still be present as estimates. Recovery packets set `80`, clear `08`, and currently fall back to `0e` without joints. Treat these conditions as different from a new measured anchor. The packet does not transmit a separate orientation, controller buttons, controller identity, or raw IMU data.
-
-App-state bit **`00000001` = acquiring hands** applies globally, independently of whether a hand is currently visible. While set, the host should show acquisition/settling status rather than a ready-to-recenter prompt. When cleared, the tracker is ready for the host to invite recentering. If set again, return to acquisition state.
-
-When no hand packets are available during acquisition, the pipeline can emit a `10` status packet with side `0`, zero joints/position/confidence, and the acquisition flag. Process its app state, but never submit it as a hand at `(0,0,0)`. Outside acquisition, the absence of hand output need not produce a status packet. Use a per-hand receive timeout to detect disappearance; do not wait for a mandatory "hand lost" message.
-
-### Joint records and anchor meaning
-
-Each record at `120 + 24*i` contains:
-
-| Relative offset | Type | Meaning |
-| ---: | --- | --- |
-| 0 | `f32` | Normalized capture X |
-| 4 | `f32` | Normalized capture Y |
-| 8 | `f32` | Confidence |
-| 12 | `f32` | Local X meters for version `10` |
-| 16 | `f32` | Local Y meters for version `10` |
-| 20 | `f32` | Local Z meters for version `10` |
-
-Record index is implicit. The 21-joint hand order is:
-
-| Indices | Landmarks |
-| --- | --- |
-| 0 | Wrist |
-| 1–4 | Thumb CMC, MCP, IP, tip |
-| 5–8 | Index MCP, PIP, DIP, tip |
-| 9–12 | Middle MCP, PIP, DIP, tip |
-| 13–16 | Ring MCP, PIP, DIP, tip |
-| 17–20 | Little-finger MCP, PIP, DIP, tip |
-
-In hand mode the primary tracking anchor is **joint 9, middle-finger MCP**, despite the historical `handIndex` naming. Body-derived tracks use a body-wrist/palm estimate and do not supply this hand skeleton. Version `10` joints originate from MediaPipe metric hand-local landmarks, rotated/reflected into tracker coordinates; they are **not absolute positions** and are not automatically relative to the packet anchor.
-
-To place a hand skeleton at the measured anchor, use:
-
-```text
-absolute_joint[i] = packet_anchor + local_joint[i] - local_joint[9]
-```
-
-This anchors the local shape's middle MCP to the measured position. It is an integration mapping, not an extra transmitted transform. Use the local skeleton's directions to estimate an orientation if required; the app provides no quaternion or specified controller-grip offset. If joints are absent, only the anchor is available, so orientation must come from another source or a host-side model.
-
-Historically `0e` joint XYZ meant camera-space points, whereas `10` introduces hand-local coordinates using the same byte stride. Do not silently treat both as local. The current `0e` builder emits zero joints, so new integrations can support that fallback without reconstructing older skeletons. The `0f` compact variant mentioned in acquisition notes is not emitted by this build.
-
-### Tracker coordinates
-
-Normalized capture coordinates are clamped to `[0,1]` and use the capture image convention, **Y increasing upward** (`v_pixel = (1-y)*(height-1)`), before preview/display orientation mapping. They are not necessarily coordinates in a mirrored on-screen preview.
-
-The anchor's `cameraX/Y/Z` field names are historical: the encoder already transforms them into a pitch-leveled and yaw-corrected tracker frame. Depth starts positive away from the camera. In the landscape canonical mapping, physical camera X is negated, Y is preserved, and Z is preserved. Portrait mappings additionally rotate XY. In exact terms, if a projected physical camera point is `(x,y,z)`, canonical coordinates are:
-
-| Orientation | Canonical camera point |
-| --- | --- |
-| Landscape left/right | `(-x, y, z)` |
-| Portrait | `(y, x, z)` |
-| Portrait upside-down | `(-y, -x, z)` |
-
-The builder then applies pitch `p` followed by yaw correction `a`:
-
-```text
-x1 = x
-y1 = y*cos(p) - z*sin(p)
-z1 = y*sin(p) + z*cos(p)
-X  = x1*cos(a) - z1*sin(a)
-Y  = y1
-Z  = x1*sin(a) + z1*cos(a)
-```
-
-The result is transmitted. Do **not** level it again using phone pitch; the current pitch hint is intentionally zero to prevent double correction by older receivers. Stabilization deltas remain in the earlier camera XY frame and are diagnostic, not an extra correction to add to the transmitted position. The capture-source flag distinguishes TrueDepth; it is not a calibration matrix. Intrinsics and a transform into the desktop VR world are not transmitted. Establish the latter in your receiver.
-
-## Tracker clock synchronization and calibration
-
-### Clock exchange
-
-The tracker sends a PUSB-wrapped `SYNC` request immediately after connection readiness and then about every **2 seconds**, skipping a tick when a pose write is in flight. The host should reply promptly using one monotonic clock throughout the session. Names containing "Mac" in source fields mean the receiver host, regardless of OS.
-
-| Offset | SYNC request (18 bytes) | SYNR response (34 bytes) |
-| ---: | --- | --- |
-| 0 | ASCII `SYNC` | ASCII `SYNR` |
-| 4 | `u8` version `01` | `u8` version `01` |
-| 5 | `u8` reserved `00` | `u8` reserved `00` |
-| 6 | `u32` sequence | Echo sequence |
-| 10 | `f64` phone send uptime `t0`, seconds | Echo `t0` exactly |
-| 18 | — | `f64` host receive uptime `t1`, seconds |
-| 26 | — | `f64` host send uptime `t2`, seconds |
-
-Capture `t1` when the request is received and `t2` immediately before sending the response. PUSB-wrap the response. At phone receipt time `t3`, the implementation computes:
-
-```text
-RTT = max(0, t3 - t0)
-host_minus_phone_offset = (t1 + t2)/2 - (t0 + t3)/2
-```
-
-It retains the offset from the lowest-RTT exchange on that connection, while reporting the latest RTT. This implementation does not subtract host processing time from RTT. The outgoing offset and RTT fields are in **milliseconds**, though the sync timestamps are in **seconds**. Zero telemetry before synchronization does not establish zero real offset.
-
-For example, approximate host send time is `send_uptime + offset_ms/1000`. Subtract that from the same host monotonic clock to estimate time since transmission. Avoid claiming absolute sensor latency from a capture timestamp unless you have established that capture's clock alignment too. Clock sync is optional for receiving positions, but required for meaningful cross-device timing estimates. The controller app does not implement this exchange.
-
-### Tracker yaw calibration
-
-Send a PUSB payload of ASCII **`ORST`** to request yaw calibration. The tracker also accepts framed case-insensitive text `orst`, `orientation_reset`, `reset_orientation`, or `yaw_reset`, and framed JSON such as `{"action":"orientation_reset"}`. JSON keys may be `action`, `event`, `type`, or `command`; values may be the three long aliases. JSON key names are case-sensitive. A payload starting with binary ASCII `ORST` is recognized as well.
-
-The tracker drops pending unsent pose data, asks its yaw estimator to use recent valid measured left/right hand samples after pitch leveling, and resets its screen-space depth index. The geometric basis is `atan2(right.z-left.z, right.x-left.x)`; the opposite rotation is applied to subsequent anchors and local joints. The implementation uses a filtered sample estimate, caps correction at ±45°, and may wait for more samples or decline an insufficient-sample reset. Hold both hands visible in the intended calibration pose. It does not zero position or create a shared world origin.
-
-There is **no calibration acknowledgement or result packet**. Confirm the effect through subsequent valid measurements; with a suitable calibration pose the corrected hands should have approximately equal Z. This command is distinct from the phone controller's byte `7e` and from its logging-only `ORST` handling.
-
-### Tracker launch links
-
-The tracker accepts `https://portalvr.io/tracker` (also with surrounding path slashes). An optional valid JSON payload may be supplied through query keys `payload`, `json`, or `data`, a percent-encoded bare JSON query, or a percent-encoded fragment. It stores/logs the accepted link and posts a local notification. The inspected code does not define a JSON configuration schema or use it to configure the stream endpoint. Do not depend on this as a remote tracking-control API.
-
 ## Reference receiver code
 
-The following Python 3 code is self-contained for current iOS streams and also supplies a parser for Android phone data. Save it as `receiver.py`. No third-party Python modules are needed for USBMux. It prints decoded data; a production receiver should retain the newest state, apply freshness policy, and avoid printing every sample.
+The following Python 3 code is self-contained for the iOS controller stream and also supplies a parser for Android phone data. Save it as `receiver.py`. No third-party Python modules are needed for USBMux. Its transport helpers are reused by the [tracker receiver](TRACKER.md#reference-receiver-code). It prints decoded data; a production receiver should retain the newest state, apply freshness policy, and avoid printing every sample.
 
-Run `python3 receiver.py tracker` or `python3 receiver.py controller`. With multiple iOS devices, append the desired serial/UDID. For a pre-existing TCP tunnel, run `python3 receiver.py tcp HOST PORT`. `USBMUXD_SOCKET_ADDRESS` can override the host daemon endpoint. The example never sends kill or reset automatically.
+Run `python3 receiver.py`. With multiple iOS devices, append the desired serial/UDID. For a pre-existing TCP tunnel, run `python3 receiver.py tcp HOST PORT`. `USBMUXD_SOCKET_ADDRESS` can override the host daemon endpoint. The example never sends kill or reset automatically.
 
 ```python
 import os
@@ -462,7 +290,6 @@ import plistlib
 import socket
 import struct
 import sys
-import time
 
 
 def exact(sock, n):
@@ -518,6 +345,15 @@ def usbmux_connect(port, serial=None):
     return s
 
 
+def connect(default_port, argv, usage):
+    """Open a USBMux tunnel ([SERIAL]) or an existing TCP tunnel (tcp HOST PORT)."""
+    if len(argv) == 3 and argv[0] == "tcp":
+        return socket.create_connection((argv[1], int(argv[2])))
+    if len(argv) <= 1:
+        return usbmux_connect(default_port, argv[0] if argv else None)
+    raise SystemExit(usage)
+
+
 def frame(payload):
     return struct.pack("<4sBBHI", b"PUSB", 1, 0, 0, len(payload)) + payload
 
@@ -552,24 +388,6 @@ def controller(p):
     return result
 
 
-def pose(p):
-    if len(p) < 120 or p[:4] != b"POSE" or p[4] not in (0x0e, 0x10):
-        raise ValueError("unsupported tracker packet")
-    count, side, flags = p[5:8]
-    if len(p) != 120 + 24 * count:
-        raise ValueError("invalid joint payload length")
-    return dict(version=p[4], side=side, flags=flags,
-                sequence=struct.unpack_from("<I", p, 8)[0],
-                capture_seconds=struct.unpack_from("<d", p, 12)[0],
-                normalized_xy=struct.unpack_from("<2f", p, 20),
-                anchor_m=struct.unpack_from("<3f", p, 28),
-                confidence=struct.unpack_from("<f", p, 40)[0],
-                send_seconds=struct.unpack_from("<d", p, 84)[0],
-                host_offset_ms=struct.unpack_from("<f", p, 92)[0],
-                acquiring=bool(struct.unpack_from("<I", p, 116)[0] & 1),
-                joints=[struct.unpack_from("<6f", p, 120 + 24*i) for i in range(count)])
-
-
 def haptics(amplitude=128, hand_mask=3, duration_ms=100):
     if not (0 <= amplitude <= 255 and 0 <= hand_mask <= 3 and 0 <= duration_ms <= 5000):
         raise ValueError("invalid haptics arguments")
@@ -579,14 +397,7 @@ def haptics(amplitude=128, hand_mask=3, duration_ms=100):
 def ios_loop(s):
     while True:
         p = read_frame(s)
-        received = time.monotonic()
-        if p[:4] == b"SYNC" and len(p) == 18 and p[4] == 1:
-            # Echo version/reserved, sequence and t0 byte-for-byte.
-            response = b"SYNR" + p[4:18] + struct.pack("<dd", received, time.monotonic())
-            s.sendall(frame(response))
-        elif p[:4] == b"POSE":
-            print("tracker", pose(p))
-        elif p[:1] == b"\x10":
+        if p[:1] == b"\x10":
             print("controller", controller(p))
         elif p == b"\x7e":
             print("recenter requested; apply host calibration here")
@@ -634,19 +445,11 @@ class AndroidPhoneParser:
 
 
 if __name__ == "__main__":
-    mode = sys.argv[1] if len(sys.argv) > 1 else "tracker"
-    if mode == "tcp":
-        sock = socket.create_connection((sys.argv[2], int(sys.argv[3])))
-    elif mode in ("tracker", "controller"):
-        sock = usbmux_connect(5005 if mode == "tracker" else 5006,
-                              sys.argv[2] if len(sys.argv) > 2 else None)
-    else:
-        raise SystemExit("usage: receiver.py tracker|controller [SERIAL] | tcp HOST PORT")
-    with sock:
+    with connect(5006, sys.argv[1:], "usage: receiver.py [SERIAL] | tcp HOST PORT") as sock:
         ios_loop(sock)
 ```
 
-For Android, the USB-access layer is platform-specific: after the AOA setup above, write `b"\x01"` to bulk OUT, repeatedly pass bulk IN reads into `AndroidPhoneParser.feed`, and dispatch the returned events. Write `haptics(...)` directly to bulk OUT. For iOS controller haptics use `sock.sendall(frame(haptics(...)))`. To calibrate the tracker use `sock.sendall(frame(b"ORST"))` on its port-5005 connection. Use one serialized writer if multiple threads send commands.
+For Android, the USB-access layer is platform-specific: after the AOA setup above, write `b"\x01"` to bulk OUT, repeatedly pass bulk IN reads into `AndroidPhoneParser.feed`, and dispatch the returned events. Write `haptics(...)` directly to bulk OUT. For iOS controller haptics use `sock.sendall(frame(haptics(...)))`. Use one serialized writer if multiple threads send commands.
 
 ### Small wire vectors
 
@@ -656,27 +459,23 @@ For Android, the USB-access layer is platform-specific: after the AOA setup abov
 | Android left recenter request | `7e 00` |
 | Android right recenter request | `7e 01` |
 | iOS framed recenter request | `50 55 53 42 01 00 00 00 01 00 00 00 7e` |
-| Framed tracker calibration | `50 55 53 42 01 00 00 00 04 00 00 00 4f 52 53 54` |
 | Raw 100 ms half-amplitude haptics | `20 80 00 03 64 00 00 00` |
 
-For a zeroed controller sample, set quaternion W at offset 26 to float `1.0` (`00 00 80 3f`), type at 0 to `10`, and version at 1 to `03` or `09`; use the corresponding full packet length. For a neutral Android auxiliary quaternion also set W at offset 91 to `1.0`. A tracker acquisition-only sample has `POSE`, version `10`, side/count zero, and app-state `01 00 00 00` at offset 116; its length is 120.
+For a zeroed controller sample, set quaternion W at offset 26 to float `1.0` (`00 00 80 3f`), type at 0 to `10`, and version at 1 to `03` or `09`; use the corresponding full packet length. For a neutral Android auxiliary quaternion also set W at offset 91 to `1.0`.
 
 ## Integration checklist and troubleshooting
 
 - **Connected but no Android data:** verify all three accessory identity strings, permission, an open bulk read loop, and the initial raw `01`. Do not add PUSB framing.
-- **iOS connection refused:** check the app is active, the device is trusted, and select port 5005 for tracker or 5006 for controller. Select the right USB device; a second receiver can replace your iOS connection.
+- **iOS connection refused:** check the app is active, the device is trusted, and select port 5006 for the controller (5005 is the [tracker](TRACKER.md)). Select the right USB device; a second receiver can replace your iOS connection.
 - **Controller floats are nonsense:** check the version byte at offset 1, packed little-endian layout, and quaternion order. The obsolete 54-byte controller description has different offsets.
-- **Tracker decoder rejects new packets:** support `0e` and `10`; some bundled desktop code still stops at older versions. Validate the 120-byte base and count-derived length.
-- **Tracker depth/orientation seems reversed:** distinguish capture-normalized coordinates, canonical tracker coordinates, and the controller's AR world. Avoid applying leveling twice or treating hand-local joints as absolute.
-- **Hands jump during acquisition/recovery:** inspect global acquisition state plus synthetic/recovery flags. Keep per-hand state and freshness separately; a packet for one hand does not refresh the other.
-- **Inputs stick after disconnection:** clear buttons and touch state when the connection ends or crosses your timeout. Neither protocol supplies a universally mandated timeout; choose one for your application and tolerate expected scheduling jitter.
-- **Packets arrive but pose is frozen:** inspect tracking state, timestamp progression, and tracker flags. State cadence and measurement cadence differ.
-- **Reset has no effect:** distinguish direction, app, and encoding. Tracker `ORST` estimates yaw only; controller `7e` requests host calibration; iOS controller inbound `ORST` only logs.
+- **Inputs stick after disconnection:** clear buttons and touch state when the connection ends or crosses your timeout. The protocol supplies no universally mandated timeout; choose one for your application and tolerate expected scheduling jitter.
+- **Packets arrive but pose is frozen:** inspect tracking state and timestamp progression. State cadence and measurement cadence differ.
+- **Reset has no effect:** distinguish direction, app, and encoding. Controller `7e` requests host calibration; Android's host-to-phone `7e` only marks the reset complete; iOS controller inbound `ORST` only logs.
 
 The reference code validates current layouts, not all historical firmware. For production, reject nonfinite measurement values before using them, bound buffers, preserve frame boundaries, tolerate unknown flag bits, and keep a single parser state per connection. Release inputs on errors and discard partial parser buffers before reconnecting.
 
 ## Compatibility notes
 
-The current layouts above were checked against the app implementations on **2026-09-15**. This document does not claim physical-device interoperability testing.
+The current layouts above were checked against the app implementations on **2026-09-15**. Receiver examples were checked with synthetic packets and fragmented streams; this document does not claim physical-device interoperability testing.
 
-The old 54-byte/4 ms/BLE controller description does not describe the current apps; the Android phone's current 171-byte size is not optional. Older tracker decoders accepting only versions `01..0d` must be updated before decoding this tracker build. Use the packet versions and layouts documented here rather than assuming compatibility with older protocol descriptions.
+The old 54-byte/4 ms/BLE controller description does not describe the current apps; the Android phone's current 171-byte size is not optional. Use the packet versions and layouts documented here rather than assuming compatibility with older protocol descriptions.
