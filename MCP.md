@@ -295,7 +295,7 @@ These are plain HTTP endpoints, not MCP methods:
 | --- | --- | --- |
 | `GET /health/live` | Not required | `{"status":"live"}` while the process runs |
 | `GET /health/ready` | Not required | `{"status":"ready"}` once the listener and tool catalog are ready, even with no XR application; otherwise `503` |
-| `GET /status` | Required | Redacted transport, adapter, and catalog-fingerprint information |
+| `GET /status` | Required | Redacted transport, adapter, and catalog-fingerprint information; `404` when `require_token` is off |
 
 Health responses include the headers `X-PortalVR-Capture-Active` and `X-PortalVR-Client-Connected` (`0` or `1`), and `X-PortalVR-Tool-Registry-Revision`, which increases when the custom-tool set changes.
 
@@ -387,17 +387,17 @@ Annotations: **R** read-only, **D** destructive, **I** idempotent, **W** open-wo
 | [`math_calc`](#math_calc) | **`expression`** | R I | Nothing |
 | [`math_dot`](#math_dot) | **`vector_a`**, **`vector_b`** | R I | Nothing |
 | [`math_cross`](#math_cross) | **`vector_a`**, **`vector_b`** | R I | Nothing |
-| [`math_add`](#math_add-math_sub-math_mul-math_div) | **`a`**, **`b`** | R I | Nothing |
-| [`math_sub`](#math_add-math_sub-math_mul-math_div) | **`a`**, **`b`** | R I | Nothing |
-| [`math_mul`](#math_add-math_sub-math_mul-math_div) | **`a`**, **`b`** | R I | Nothing |
-| [`math_div`](#math_add-math_sub-math_mul-math_div) | **`a`**, **`b`** | R I | Nothing |
+| [`math_add`](#math_add) | **`a`**, **`b`** | R I | Nothing |
+| [`math_sub`](#math_sub) | **`a`**, **`b`** | R I | Nothing |
+| [`math_mul`](#math_mul) | **`a`**, **`b`** | R I | Nothing |
+| [`math_div`](#math_div) | **`a`**, **`b`** | R I | Nothing |
 | [`math_build_quat`](#math_build_quat) | **`front_direction`**, `up_direction`, `return_basis_vectors` | R I | Nothing |
 | [`math_decompose_quat`](#math_decompose_quat) | **`quaternion`** | R I | Nothing |
 | [`openxr_set_controller_input`](#openxr_set_controller_input) | **`hand`**, **`component`**, **`value`**, `sub_component`, `auto_release`, `hold_duration`, `session_handle` | W | Active controller |
 | [`openxr_set_head_pose`](#openxr_set_head_pose) | `position`, `orientation`, `base_space`, `duration_seconds`, `session_handle` | I W | Active headset |
 | [`openxr_set_controller_pose`](#openxr_set_controller_pose) | **`hand`**, `pose_type`, `position`, `orientation`, `base_space`, `duration_seconds`, `session_handle` | I W | Active controller |
-| [`convert_unity_pose_to_openxr`](#convert_unity_pose_to_openxr-convert_openxr_pose_to_unity) | `position`, `orientation` | R I | Nothing |
-| [`convert_openxr_pose_to_unity`](#convert_unity_pose_to_openxr-convert_openxr_pose_to_unity) | `position`, `orientation` | R I | Nothing |
+| [`convert_unity_pose_to_openxr`](#convert_unity_pose_to_openxr) | `position`, `orientation` | R I | Nothing |
+| [`convert_openxr_pose_to_unity`](#convert_openxr_pose_to_unity) | `position`, `orientation` | R I | Nothing |
 | [`openxr_convert_pose_between_spaces`](#openxr_convert_pose_between_spaces) | `source_space`, `target_space`, `position`, `orientation`, `session_handle` | R W | Session with a head pose |
 
 "Runtime" means a connected SteamVR runtime, with or without a running application. "Known controller" means PortalVR reports a controller profile for that hand; "active controller" means that controller is currently connected. See [controllers for input and pose control](#controllers-for-input-and-pose-control).
@@ -564,7 +564,7 @@ Captures the final composited image for one eye, after PortalVR's compositor, as
 ```
 
 - `data` is base64 PNG without a `data:` prefix. Exactly one eye is returned.
-- Images larger than `capture_max_dimension`, or whose PNG would exceed 12 MiB, are downscaled; `_portalvr.source_width`, `source_height`, and `downscaled` report it. Setting `capture_max_png_bytes` above 12 MiB has no effect.
+- Images larger than `capture_max_dimension` are downscaled, then shrunk further in steps until the PNG fits `capture_max_png_bytes` (effectively at most 12 MiB; larger settings have no effect). `_portalvr.source_width`, `source_height`, and `downscaled` report it.
 - Captures are limited to `limits.capture_per_second` and one at a time per client.
 - In a 2D PortalVR session both eyes show the same image until the [two-eye restart](#eye-capture-in-2d-mode).
 
@@ -580,7 +580,7 @@ Evaluates one scalar expression safely. Vectors are not supported.
 
 `{"expression":"sqrt(2) * sin(pi / 4) + max(1, 2, 3)"}` returns `{"result":4}`.
 
-The grammar has numbers, `+ - * /`, unary minus, `**` for exponentiation, parentheses, the constants `pi` and `e`, and the functions `abs`, `sqrt`, `exp`, `log` (natural), `log10`, `pow`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `floor`, `ceil`, `round`, `min`, and `max`. Angles are radians.
+The grammar has numbers, `+ - * /`, unary minus, `**` for exponentiation, parentheses, the constants `pi` and `e`, and the functions `abs`, `sqrt`, `exp`, `log` (natural, or `log(x, base)`), `log10`, `pow`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `floor`, `ceil`, `round` (ties to even; optionally `round(x, digits)` with an integer `digits` from −15 to 15), `min`, and `max`. Angles are radians.
 
 **Errors:** `EXPRESSION_ERROR` for `^`, `%`, variables, unknown functions, syntax errors, division by zero, and non-finite results.
 
@@ -610,18 +610,57 @@ Computes the right-handed cross product `vector_a × vector_b`.
 
 **Errors:** `INVALID_ARGUMENT` as for `math_dot`.
 
-### `math_add`, `math_sub`, `math_mul`, `math_div`
+### `math_add`
 
-Add, subtract (`a − b`), multiply, or divide (`a ÷ b`) componentwise.
+Computes `a + b`, componentwise.
 
 | Argument | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `a` | number or 3 numbers | required | First operand |
-| `b` | number or 3 numbers | required | Second operand |
+| `a` | number or 3 numbers | required | First addend |
+| `b` | number or 3 numbers | required | Second addend |
 
-Two numbers give a number. Two vectors combine per component. A number and a vector apply the number to each component, keeping operand order: `math_sub` with `{"a":10,"b":[1,2,3]}` returns `{"result":[9,8,7]}`, and `math_div` with `{"a":[2,4,6],"b":2}` returns `{"result":[1,2,3]}`.
+Two numbers give a number; two vectors combine per component; a number and a vector apply the number to each component, in operand order. `{"a":[1,2,3],"b":[4,5,6]}` returns `{"result":[5,7,9]}`.
 
-**Errors:** `INVALID_ARGUMENT` for a wrong-length vector; `DIVIDE_BY_ZERO` from `math_div` when any divisor component is zero.
+**Errors:** `INVALID_ARGUMENT` for a vector that does not have exactly three numbers.
+
+### `math_sub`
+
+Computes `a − b`, componentwise.
+
+| Argument | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `a` | number or 3 numbers | required | Minuend |
+| `b` | number or 3 numbers | required | Subtrahend |
+
+Two numbers give a number; two vectors combine per component; a number and a vector apply the number to each component, in operand order. `{"a":10,"b":[1,2,3]}` returns `{"result":[9,8,7]}`.
+
+**Errors:** `INVALID_ARGUMENT` for a vector that does not have exactly three numbers.
+
+### `math_mul`
+
+Computes `a × b`, componentwise (not a dot or cross product).
+
+| Argument | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `a` | number or 3 numbers | required | First factor |
+| `b` | number or 3 numbers | required | Second factor |
+
+Two numbers give a number; two vectors combine per component; a number and a vector apply the number to each component, in operand order. `{"a":[1,2,3],"b":2}` returns `{"result":[2,4,6]}`.
+
+**Errors:** `INVALID_ARGUMENT` for a vector that does not have exactly three numbers.
+
+### `math_div`
+
+Computes `a ÷ b`, componentwise.
+
+| Argument | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `a` | number or 3 numbers | required | Dividend |
+| `b` | number or 3 numbers | required | Divisor |
+
+Two numbers give a number; two vectors combine per component; a number and a vector apply the number to each component, in operand order. `{"a":[2,4,6],"b":2}` returns `{"result":[1,2,3]}`.
+
+**Errors:** `INVALID_ARGUMENT` for a vector that does not have exactly three numbers. `DIVIDE_BY_ZERO` when the divisor, or any divisor component, is zero.
 
 ### `math_build_quat`
 
@@ -708,7 +747,7 @@ Supply `position`, `orientation`, or both. Moving the head moves the whole simul
 
 `target_pose` is the full resolved target, including any component you omitted.
 
-**Errors:** `INVALID_ARGUMENT` when neither `position` nor `orientation` is supplied or a value is out of range; `CAPABILITY_UNAVAILABLE` while the headset is inactive; `SPACE_UNSUPPORTED` for `local`.
+**Errors:** `INVALID_ARGUMENT` when neither `position` nor `orientation` is supplied or a value is out of range; `CAPABILITY_UNAVAILABLE` while the headset is inactive; `SPACE_UNSUPPORTED` for `local`; `POSE_INVALID` when the current head pose is not valid.
 
 ### `openxr_set_controller_pose`
 
@@ -724,7 +763,7 @@ The result matches the head-pose result with `target: "controller"` and `hand` a
 
 For a focused OpenXR application, SteamVR derives both grip and aim from one controller origin, so an `aim` override moves that origin and the result still reports `aim`. For other applications `aim` overrides are unavailable.
 
-**Errors:** as for `openxr_set_head_pose`, plus `CAPABILITY_UNAVAILABLE` when no controller is active on that hand or for `aim` outside a focused OpenXR application.
+**Errors:** as for `openxr_set_head_pose`, plus `CAPABILITY_UNAVAILABLE` when no controller is active on that hand or for `aim` outside a focused OpenXR application, and `POSE_INVALID` when the controller's current pose is not valid, for example while it is connected but untracked.
 
 #### Override lifetime
 
@@ -732,22 +771,35 @@ A new override replaces the previous one for the same target, starting from the 
 
 Overrides and held inputs survive the disconnect of the client that set them, so a test harness should restore or clear them itself.
 
-### `convert_unity_pose_to_openxr`, `convert_openxr_pose_to_unity`
+### `convert_unity_pose_to_openxr`
 
-Convert a position and/or quaternion between Unity's left-handed convention and OpenXR's right-handed one. They need no XR application.
+Converts a position and/or quaternion from Unity's left-handed convention to OpenXR's right-handed one. Needs no XR application.
 
 | Argument | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `position` | 3 numbers | none | Position to convert |
-| `orientation` | 4 numbers | none | Quaternion to convert |
+| `position` | 3 numbers | none | Unity position |
+| `orientation` | 4 numbers | none | Unity quaternion |
 
-Both tools apply the same Z-mirroring transform: position `[x, y, z]` becomes `[x, y, -z]`, and quaternion `[x, y, z, w]` becomes `[-x, -y, z, w]` after normalization, with `w ≥ 0`. Only supplied components are returned. `convert_unity_pose_to_openxr` with `{"position":[1,2,3],"orientation":[0,0.7071068,0,0.7071068]}` returns:
+The transform mirrors Z: position `[x, y, z]` becomes `[x, y, -z]`, and quaternion `[x, y, z, w]` becomes `[-x, -y, z, w]` after normalization, with `w ≥ 0`. Only supplied components are returned. `{"position":[1,2,3],"orientation":[0,0.7071068,0,0.7071068]}` returns:
 
 ```json
 {"position":[1,2,-3],"orientation":[0,-0.7071067811865475,0,0.7071067811865475]}
 ```
 
-**Errors:** `INVALID_ARGUMENT` when neither component is supplied or a quaternion is zero.
+**Errors:** `INVALID_ARGUMENT` when neither component is supplied or the quaternion is zero.
+
+### `convert_openxr_pose_to_unity`
+
+Converts a position and/or quaternion from OpenXR's right-handed convention to Unity's left-handed one. Needs no XR application.
+
+| Argument | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `position` | 3 numbers | none | OpenXR position |
+| `orientation` | 4 numbers | none | OpenXR quaternion |
+
+The transform is the same Z mirror as [`convert_unity_pose_to_openxr`](#convert_unity_pose_to_openxr), which is its own inverse. `{"position":[1,2,-3]}` returns `{"position":[1,2,3]}`.
+
+**Errors:** `INVALID_ARGUMENT` when neither component is supplied or the quaternion is zero.
 
 ### `openxr_convert_pose_between_spaces`
 
@@ -771,12 +823,21 @@ Through SteamVR, `stage` and `local_floor` are the same space, so converting bet
 
 ## Application custom tools
 
-An OpenXR application can add its own tools through the `XR_METAX1_agentic_external_tool` extension, version 1. PortalVR provides it through the explicit OpenXR API layer `XR_APILAYER_PORTALVR_steamvr_mcp_metax1`, which SteamVR lists as **Application controlled**. The application enables that layer and the extension before `xrCreateInstance`, then calls `xrAgenticRegisterExternalToolMETAX1` for each tool with a name, a description, parameter descriptors, and a callback. Ordinary MCP use does not need this layer.
+An OpenXR application can add its own tools through the `XR_METAX1_agentic_external_tool` extension, version 1. PortalVR provides it through the explicit OpenXR API layer `XR_APILAYER_PORTALVR_steamvr_mcp_metax1`, which SteamVR lists as **Application controlled**. The application enables that layer and the extension before `xrCreateInstance`, then calls `xrAgenticRegisterExternalToolMETAX1` for each tool with a name, a description, parameter descriptors, and a callback. Ordinary MCP use does not need this layer, and the layer is registered only while **MCP Server** is on, so enumerate API layers before requesting it.
+
+The C declarations ship with PortalVR in `steamvr-portalvr\mcp\sdk\metax1_agentic_external_tool.h`: the extension name, the structure types `XrAgenticExternalToolParameterMETAX1` (type `1000679000`) and `XrAgenticExternalToolRegisterInfoMETAX1` (type `1000679001`), the parameter types (string `1`, number `2`, boolean `3`, array `4`, object `5`), the callback flags, and the function pointer types. The callback has this signature:
+
+```c
+XrResult callback(char *resultBuffer, uint32_t resultBufferCapacityInput,
+                  uint32_t *resultBufferCountOutput, const char *parameters, void *userData);
+```
 
 - Tool names must match `^[A-Za-z0-9_.-]{1,63}$`. Names beginning `openxr_`, `math_`, `convert_`, or `portalvr.` are reserved, and duplicate names in one instance fail.
 - Registered tools follow the built-ins in `tools/list`, in registration order, and are listed and callable only while the application's session is focused and selected. Their schemas are objects with `additionalProperties: false` built from the parameter descriptors.
 - Tools are retired when the instance is destroyed or the application disconnects; version 1 has no unregister call.
-- A call receives the arguments as JSON text, and the callback writes a JSON result. An object becomes the tool result as is; any other JSON value is wrapped as `{"result": …}`. A failing callback or invalid JSON is reported as `CUSTOM_TOOL_ERROR`, and calls have a 10-second deadline.
+- `parameters` is the call's arguments as JSON text. The layer calls the callback twice, in the usual OpenXR two-call pattern: first with a null buffer and zero capacity to read the required size, then with a buffer of exactly that size. The count includes the terminating NUL, and the result may be up to 1 MiB.
+- The result must be JSON. An object becomes the tool result as is; any other JSON value is wrapped as `{"result": …}`. A failing callback, a size mismatch, or invalid JSON is reported as `CUSTOM_TOOL_ERROR`, and calls have a 10-second deadline.
+- `toolCallbackInfoFlags` chooses the thread. With no flag, the callback runs on a layer worker thread. With `XR_AGENTIC_EXTERNAL_TOOL_CALLBACK_INFO_APPLICATION_MAIN_THREAD_BIT_METAX1` it runs inside the application's `xrPollEvent` calls; with `XR_AGENTIC_EXTERNAL_TOOL_CALLBACK_INFO_RENDERING_MAIN_THREAD_BIT_METAX1` it runs inside `xrWaitFrame`. Setting both fails registration with `XR_ERROR_VALIDATION_FAILURE`.
 
 ## Recovery
 
